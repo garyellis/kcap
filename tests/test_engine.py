@@ -17,6 +17,7 @@ from kcap.engine import (
     remove_workload,
     update_cpu_limit,
     update_cpu_request,
+    update_machine_cpu,
     validate,
 )
 
@@ -31,13 +32,15 @@ def cluster_with(
 ) -> ClusterConfig:
     return ClusterConfig(
         workloads={workload.name: workload},
-        node_pool=NodePool(
-            name="default",
-            machine=machine or MachineSpec(cpu_m=4000, memory_mib=8192),
-            min_nodes=min_nodes,
-            current_nodes=current_nodes,
-            max_nodes=max_nodes,
-        ),
+        node_pools={
+            "default": NodePool(
+                name="default",
+                machine=machine or MachineSpec(cpu_m=4000, memory_mib=8192),
+                min_nodes=min_nodes,
+                current_nodes=current_nodes,
+                max_nodes=max_nodes,
+            ),
+        },
     )
 
 
@@ -142,7 +145,7 @@ class TestScheduling:
         scenario = evaluate(cluster).scenarios["current"]
 
         assert scenario.nodes_required == 3
-        assert scenario.limiting_resource == "fragmentation"
+        assert scenario.pools["default"].limiting_resource == "fragmentation"
 
     def test_scaling_fields_observe_ca_minimum_and_current_nodes(self) -> None:
         cluster = cluster_with(
@@ -158,7 +161,7 @@ class TestScheduling:
         assert scenario.effective_nodes_required == 3
         assert scenario.nodes_to_add == 0
         assert scenario.nodes_to_remove == 3
-        assert scenario.node_headroom == 17
+        assert scenario.pools["default"].node_headroom == 17
         assert scenario.schedulable is True
 
     def test_pod_too_large_is_explicitly_unschedulable(self) -> None:
@@ -170,7 +173,7 @@ class TestScheduling:
         scenario = evaluate(cluster).scenarios["current"]
 
         assert scenario.schedulable is False
-        assert scenario.limiting_resource == "pod_too_large"
+        assert scenario.pools["default"].limiting_resource == "pod_too_large"
 
     def test_max_pod_density_is_a_constraint(self) -> None:
         cluster = cluster_with(
@@ -181,7 +184,7 @@ class TestScheduling:
         scenario = evaluate(cluster).scenarios["current"]
 
         assert scenario.nodes_required == 3
-        assert scenario.limiting_resource == "pod_count"
+        assert scenario.pools["default"].limiting_resource == "pod_count"
 
     def test_effective_requirement_over_ca_max_is_unschedulable(self) -> None:
         cluster = cluster_with(
@@ -193,7 +196,7 @@ class TestScheduling:
         scenario = evaluate(cluster).scenarios["current"]
 
         assert scenario.nodes_to_add == 1
-        assert scenario.node_headroom == -1
+        assert scenario.pools["default"].node_headroom == -1
         assert scenario.schedulable is False
 
     def test_reserved_platform_overhead_reduces_allocatable_capacity(self) -> None:
@@ -210,7 +213,7 @@ class TestScheduling:
         scenario = evaluate(cluster).scenarios["current"]
 
         assert scenario.nodes_required == 2
-        assert scenario.limiting_resource == "memory"
+        assert scenario.pools["default"].limiting_resource == "memory"
 
     def test_scenario_combines_multiple_workloads(self) -> None:
         api = Workload("api", Resources(1000, 512), current_replicas=2)
@@ -401,14 +404,15 @@ class TestSaturationAndConstraint:
         )
 
         scenario = evaluate(cluster).scenarios["current"]
+        pool = scenario.pools["default"]
 
         # Only one 2000m pod fits in 3600m of allocatable CPU.
         assert scenario.effective_nodes_required == 8
-        assert scenario.pods_per_node == 1
-        assert scenario.limiting_resource == "fragmentation"
-        assert scenario.fragmentation_resource == "cpu"
-        assert scenario.capacity_cpu_m == 8 * 3600
-        assert scenario.stranded_cpu_m == 8 * 3600 - 16000
+        assert pool.pods_per_node == 1
+        assert pool.limiting_resource == "fragmentation"
+        assert pool.fragmentation_resource == "cpu"
+        assert pool.capacity_cpu_m == 8 * 3600
+        assert pool.stranded_cpu_m == 8 * 3600 - 16000
 
     def test_memory_bound_shape_reports_memory_fragmentation(self) -> None:
         cluster = cluster_with(
@@ -427,8 +431,8 @@ class TestSaturationAndConstraint:
         scenario = evaluate(cluster).scenarios["current"]
 
         assert scenario.effective_nodes_required == 3
-        assert scenario.pods_per_node == 4
-        assert scenario.fragmentation_resource == "memory"
+        assert scenario.pools["default"].pods_per_node == 4
+        assert scenario.pools["default"].fragmentation_resource == "memory"
 
     def test_tied_requirements_resolve_to_the_tighter_resource(self) -> None:
         # CPU rounds up from 1.0 nodes, memory from 2.0 nodes worth of demand
@@ -440,7 +444,7 @@ class TestSaturationAndConstraint:
 
         scenario = evaluate(cluster).scenarios["current"]
 
-        assert scenario.limiting_resource == "memory"
+        assert scenario.pools["default"].limiting_resource == "memory"
 
     def test_oversized_pods_are_excluded_from_the_node_instruction(self) -> None:
         cluster = cluster_with(
@@ -457,4 +461,126 @@ class TestSaturationAndConstraint:
         assert scenario.nodes_required == 0
         assert scenario.nodes_to_add == 0
         assert scenario.schedulable is False
-        assert scenario.limiting_resource == "pod_too_large"
+        assert scenario.pools["default"].limiting_resource == "pod_too_large"
+
+
+def pool(name: str, *, cpu_m: int = 4000, memory_mib: int = 8192) -> NodePool:
+    return NodePool(
+        name=name,
+        machine=MachineSpec(cpu_m=cpu_m, memory_mib=memory_mib),
+        min_nodes=0,
+        current_nodes=2,
+        max_nodes=10,
+    )
+
+
+class TestMultiPool:
+    def two_pool_cluster(self) -> ClusterConfig:
+        return ClusterConfig(
+            workloads={
+                "api": Workload(
+                    "api",
+                    Resources(2000, 512),
+                    current_replicas=3,
+                    pool="general",
+                ),
+                "batch": Workload(
+                    "batch",
+                    Resources(500, 6000),
+                    current_replicas=4,
+                    pool="highmem",
+                ),
+            },
+            node_pools={
+                "general": pool("general"),
+                "highmem": pool("highmem", memory_mib=16384),
+            },
+        )
+
+    def test_pools_pack_independently_and_totals_sum(self) -> None:
+        cluster = self.two_pool_cluster()
+
+        scenario = evaluate(cluster).scenarios["current"]
+
+        general = scenario.pools["general"]
+        highmem = scenario.pools["highmem"]
+        # Two 2000m pods per 4000m node; batch is memory-bound on 16 GiB nodes.
+        assert general.pod_count == 3
+        assert general.nodes_required == 2
+        assert highmem.pod_count == 4
+        assert highmem.nodes_required == 2
+        assert scenario.pod_count == 7
+        assert scenario.nodes_required == general.nodes_required + highmem.nodes_required
+        assert scenario.effective_nodes_required == (
+            general.effective_nodes_required + highmem.effective_nodes_required
+        )
+        assert scenario.current_nodes == 4
+        assert scenario.cpu_requested_m == (
+            general.cpu_requested_m + highmem.cpu_requested_m
+        )
+
+    def test_one_blocked_pool_blocks_the_scenario(self) -> None:
+        cluster = self.two_pool_cluster()
+        cluster = replace(
+            cluster,
+            workloads={
+                **cluster.workloads,
+                "batch": replace(
+                    cluster.workloads["batch"],
+                    resources=Resources(500, 20000),
+                ),
+            },
+        )
+
+        scenario = evaluate(cluster).scenarios["current"]
+
+        assert scenario.pools["general"].schedulable is True
+        assert scenario.pools["highmem"].schedulable is False
+        assert scenario.schedulable is False
+
+    def test_unknown_pool_is_rejected(self) -> None:
+        cluster = cluster_with(
+            Workload("api", Resources(100, 128), current_replicas=1, pool="gpu")
+        )
+
+        with pytest.raises(ValueError, match="unknown node pool"):
+            validate(cluster)
+
+    def test_multiple_pools_require_an_explicit_assignment(self) -> None:
+        cluster = self.two_pool_cluster()
+        cluster = replace(
+            cluster,
+            workloads={
+                **cluster.workloads,
+                "api": replace(cluster.workloads["api"], pool=None),
+            },
+        )
+
+        with pytest.raises(ValueError, match="must name a node pool"):
+            validate(cluster)
+
+    def test_unset_pool_resolves_to_the_sole_pool(self) -> None:
+        cluster = cluster_with(
+            Workload("api", Resources(100, 128), current_replicas=2)
+        )
+
+        scenario = evaluate(cluster).scenarios["current"]
+
+        assert scenario.pools["default"].pod_count == 2
+
+    def test_config_diff_tracks_pool_additions_and_changes(self) -> None:
+        baseline = cluster_with(
+            Workload("api", Resources(100, 128), current_replicas=1)
+        )
+        candidate = replace(
+            baseline,
+            node_pools={**baseline.node_pools, "gpu": pool("gpu")},
+        )
+        candidate = update_machine_cpu(candidate, "default", 8000)
+
+        diff = compare_config(baseline, candidate)
+
+        assert diff.node_pools_added == ("gpu",)
+        assert diff.node_pools_removed == ()
+        change = diff.changes["node_pools.default.machine.cpu_m"]
+        assert (change.before, change.after) == (4000, 8000)

@@ -174,6 +174,8 @@
 .field-unit { max-width: 58px; position: absolute; right: 10px; overflow: hidden; color: var(--text-3); font-size: 11px; pointer-events: none; text-overflow: ellipsis; white-space: nowrap; }
 .field > small { min-height: 14px; margin-top: 5px; display: block; color: var(--text-3); font-size: 12px; line-height: 1.4; }
 .field--invalid .field-input-wrap { border-color: var(--bad); box-shadow: 0 0 0 3px var(--bad-tint); }
+.field-input-wrap select { width: 100%; height: 100%; min-width: 0; padding: 0 8px; border: 0; outline: 0; background: transparent; color: var(--ink); font: 500 13px var(--font-mono); cursor: pointer; }
+.field-input-wrap select option { background: var(--surface); color: var(--ink); }
 .field--invalid > small { color: var(--bad); }
 .field--disabled { opacity: .45; }
 
@@ -273,6 +275,8 @@
 .change-chip.is-stale { background: var(--warn-tint); border-color: var(--warn-line); color: var(--warn); }
 
 .segmented { margin: 0 20px 4px; padding: 2px; border-radius: 8px; display: grid; grid-template-columns: repeat(5, 1fr); background: var(--track); }
+.segmented--pools { margin-top: 4px; grid-template-columns: repeat(auto-fit, minmax(0, 1fr)); }
+.pool-totals { margin: 8px 20px 4px; }
 .segmented button { min-width: 0; padding: 6px 4px 5px; border: 0; border-radius: 6px; background: transparent; color: var(--text-2); text-align: center; cursor: pointer; transition: color 120ms ease; }
 .segmented button:hover { color: var(--ink); }
 .segmented button.is-active { background: var(--surface); color: var(--ink); box-shadow: var(--shadow-card); }

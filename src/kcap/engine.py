@@ -52,6 +52,10 @@ class Workload:
     hpa: Optional[HPA] = None
     rollout: Rollout = field(default_factory=Rollout)
 
+    # Node pool this workload is pinned to. None resolves to the only pool;
+    # with several pools the assignment must be explicit.
+    pool: Optional[str] = None
+
 
 @dataclass(frozen=True)
 class MachineSpec:
@@ -86,7 +90,7 @@ class NodePool:
 @dataclass(frozen=True)
 class ClusterConfig:
     workloads: dict[str, Workload]
-    node_pool: NodePool
+    node_pools: dict[str, NodePool]
 
 
 
@@ -117,9 +121,8 @@ class WorkloadResult:
         return self.raw_desired_replicas != self.desired_replicas
 
 @dataclass(frozen=True)
-class ScenarioResult:
-    name: str
-    replicas: dict[str, int]
+class PoolScenarioResult:
+    pool: str
     pod_count: int
 
     cpu_requested_m: int
@@ -160,6 +163,35 @@ class ScenarioResult:
     @property
     def stranded_memory_mib(self) -> int:
         return max(0, self.capacity_memory_mib - self.memory_requested_mib)
+
+
+@dataclass(frozen=True)
+class ScenarioResult:
+    """Cluster-wide totals plus the per-pool evaluations they sum from.
+
+    Fields that only make sense against one machine shape (limiting resource,
+    headroom, density, capacity) stay on PoolScenarioResult; aggregating them
+    across differently-shaped pools would fabricate a number nobody configured.
+    """
+
+    name: str
+    replicas: dict[str, int]
+    pod_count: int
+
+    cpu_requested_m: int
+    memory_requested_mib: int
+
+    nodes_required: int
+    effective_nodes_required: int
+
+    current_nodes: int
+    nodes_to_add: int
+    nodes_to_remove: int
+
+    schedulable: bool
+    oversized_pod_count: int
+
+    pools: dict[str, PoolScenarioResult]
 
 
 @dataclass(frozen=True)
@@ -481,86 +513,126 @@ def update_hpa_max(
     )
 
 
-def update_machine_cpu(
-        cluster: ClusterConfig,
-        cpu_m: int,
-    ) -> ClusterConfig:
-
-    updated_machine = replace(
-        cluster.node_pool.machine,
-        cpu_m=cpu_m,
-    )
-
-    updated_node_pool = replace(
-        cluster.node_pool,
-        machine=updated_machine,
-    )
+def _update_node_pool(
+    cluster: ClusterConfig,
+    pool_name: str,
+    pool: NodePool,
+) -> ClusterConfig:
+    if pool_name not in cluster.node_pools:
+        raise ValueError(f"Node pool {pool_name!r} does not exist")
 
     return replace(
         cluster,
-        node_pool=updated_node_pool,
+        node_pools={
+            **cluster.node_pools,
+            pool_name: pool,
+        },
+    )
+
+def update_machine_cpu(
+        cluster: ClusterConfig,
+        pool_name: str,
+        cpu_m: int,
+    ) -> ClusterConfig:
+
+    pool = cluster.node_pools[pool_name]
+
+    return _update_node_pool(
+        cluster,
+        pool_name,
+        replace(
+            pool,
+            machine=replace(pool.machine, cpu_m=cpu_m),
+        ),
     )
 
 def update_machine_memory(
     cluster: ClusterConfig,
+    pool_name: str,
     memory_mib: int,
     ) -> ClusterConfig:
-    updated_machine = replace(
-        cluster.node_pool.machine,
-        memory_mib=memory_mib,
-    )
 
-    updated_node_pool = replace(
-        cluster.node_pool,
-        machine=updated_machine,
-    )
+    pool = cluster.node_pools[pool_name]
 
-    return replace(
+    return _update_node_pool(
         cluster,
-        node_pool=updated_node_pool,
+        pool_name,
+        replace(
+            pool,
+            machine=replace(pool.machine, memory_mib=memory_mib),
+        ),
     )
 
 def update_ca_max(
     cluster: ClusterConfig,
+    pool_name: str,
     max_nodes: int,
     ) -> ClusterConfig:
-    if max_nodes < cluster.node_pool.min_nodes:
+    pool = cluster.node_pools[pool_name]
+
+    if max_nodes < pool.min_nodes:
         raise ValueError(
             "CA max_nodes cannot be less than min_nodes"
         )
 
-    return replace(
+    return _update_node_pool(
         cluster,
-        node_pool=replace(
-            cluster.node_pool,
-            max_nodes=max_nodes,
-        ),
+        pool_name,
+        replace(pool, max_nodes=max_nodes),
     )
 
 
 # VALIDATION
 # ----------
+def resolve_pool_name(cluster: ClusterConfig, workload: Workload) -> str:
+    """Node pool a workload packs onto.
+
+    An unset pool is a convenience only a single-pool cluster can honor;
+    guessing among several pools would silently reroute capacity.
+    """
+    if workload.pool is not None:
+        return workload.pool
+    if len(cluster.node_pools) == 1:
+        return next(iter(cluster.node_pools))
+    raise ValueError(
+        f"{workload.name}: workload must name a node pool when multiple "
+        "pools exist"
+    )
+
+
 def validate(cluster: ClusterConfig) -> None:
     """Validate a cluster configuration before simulation."""
-    pool = cluster.node_pool
-    machine = pool.machine
+    if not cluster.node_pools:
+        raise ValueError("At least one node pool is required")
 
-    if machine.cpu_m <= 0:
-        raise ValueError("Machine CPU must be greater than zero")
-    if machine.memory_mib <= 0:
-        raise ValueError("Machine memory must be greater than zero")
-    if machine.reserved_cpu_m < 0:
-        raise ValueError("Reserved CPU cannot be negative")
-    if machine.reserved_cpu_m >= machine.cpu_m:
-        raise ValueError("Reserved CPU must be less than machine CPU")
-    if machine.reserved_memory_mib < 0:
-        raise ValueError("Reserved memory cannot be negative")
-    if machine.reserved_memory_mib >= machine.memory_mib:
-        raise ValueError("Reserved memory must be less than machine memory")
-    if machine.max_pods <= 0:
-        raise ValueError("max_pods must be greater than zero")
-    if not 0 <= pool.min_nodes <= pool.current_nodes <= pool.max_nodes:
-        raise ValueError("Expected min_nodes <= current_nodes <= max_nodes")
+    for pool_name, pool in cluster.node_pools.items():
+        if pool_name != pool.name:
+            raise ValueError(
+                f"Node pool key {pool_name!r} does not match pool.name "
+                f"{pool.name!r}"
+            )
+
+        machine = pool.machine
+        if machine.cpu_m <= 0:
+            raise ValueError(f"{pool_name}: machine CPU must be greater than zero")
+        if machine.memory_mib <= 0:
+            raise ValueError(f"{pool_name}: machine memory must be greater than zero")
+        if machine.reserved_cpu_m < 0:
+            raise ValueError(f"{pool_name}: reserved CPU cannot be negative")
+        if machine.reserved_cpu_m >= machine.cpu_m:
+            raise ValueError(f"{pool_name}: reserved CPU must be less than machine CPU")
+        if machine.reserved_memory_mib < 0:
+            raise ValueError(f"{pool_name}: reserved memory cannot be negative")
+        if machine.reserved_memory_mib >= machine.memory_mib:
+            raise ValueError(
+                f"{pool_name}: reserved memory must be less than machine memory"
+            )
+        if machine.max_pods <= 0:
+            raise ValueError(f"{pool_name}: max_pods must be greater than zero")
+        if not 0 <= pool.min_nodes <= pool.current_nodes <= pool.max_nodes:
+            raise ValueError(
+                f"{pool_name}: expected min_nodes <= current_nodes <= max_nodes"
+            )
 
     for name, workload in cluster.workloads.items():
         if name != workload.name:
@@ -612,6 +684,14 @@ def validate(cluster: ClusterConfig) -> None:
             ):
                 if target is not None and target <= 0:
                     raise ValueError(f"{name}: HPA target must be > 0")
+
+        if (
+            workload.pool is not None
+            and workload.pool not in cluster.node_pools
+        ):
+            raise ValueError(f"{name}: unknown node pool {workload.pool!r}")
+        # Raises when the assignment is ambiguous (no pool named, several exist).
+        resolve_pool_name(cluster, workload)
 
 
 def _validate_replicas(
@@ -877,14 +957,12 @@ def _shape_density(
     return pods_per_node, tightest_resource
 
 
-def evaluate_scenario(
-    name: str,
-    cluster: ClusterConfig,
-    replicas: dict[str, int],
-) -> ScenarioResult:
-    validate(cluster)
-    machine = cluster.node_pool.machine
-    pods = build_pods(cluster, replicas)
+def _evaluate_pool_scenario(
+    pool: NodePool,
+    pods: list[PodRequest],
+) -> PoolScenarioResult:
+    """Pack one pool's pods onto its machine shape and size the pool."""
+    machine = pool.machine
 
     pod_count = len(pods)
     cpu_requested_m = sum(pod.cpu_m for pod in pods)
@@ -929,16 +1007,14 @@ def evaluate_scenario(
             key=lambda key: (requirements[key], pressure[key]),
         )
 
-    pool = cluster.node_pool
     effective_nodes_required = max(nodes_required, pool.min_nodes)
     nodes_to_add = max(0, effective_nodes_required - pool.current_nodes)
     nodes_to_remove = max(0, pool.current_nodes - effective_nodes_required)
     node_headroom = pool.max_nodes - effective_nodes_required
     schedulable = not oversized_pods and effective_nodes_required <= pool.max_nodes
 
-    return ScenarioResult(
-        name=name,
-        replicas=dict(replicas),
+    return PoolScenarioResult(
+        pool=pool.name,
         pod_count=pod_count,
         cpu_requested_m=cpu_requested_m,
         memory_requested_mib=memory_requested_mib,
@@ -957,6 +1033,53 @@ def evaluate_scenario(
         oversized_pod_count=len(oversized_pods),
         pods_per_node=pods_per_node,
         fragmentation_resource=fragmentation_resource,
+    )
+
+
+def evaluate_scenario(
+    name: str,
+    cluster: ClusterConfig,
+    replicas: dict[str, int],
+) -> ScenarioResult:
+    validate(cluster)
+    pods = build_pods(cluster, replicas)
+
+    # Static partition: each workload packs onto exactly one pool. There is no
+    # spillover between pools, matching a nodeSelector-pinned deployment.
+    pods_by_pool: dict[str, list[PodRequest]] = {
+        pool_name: [] for pool_name in cluster.node_pools
+    }
+    for pod in pods:
+        workload = cluster.workloads[pod.workload_name]
+        pods_by_pool[resolve_pool_name(cluster, workload)].append(pod)
+
+    pool_results = {
+        pool_name: _evaluate_pool_scenario(pool, pods_by_pool[pool_name])
+        for pool_name, pool in cluster.node_pools.items()
+    }
+
+    return ScenarioResult(
+        name=name,
+        replicas=dict(replicas),
+        pod_count=len(pods),
+        cpu_requested_m=sum(result.cpu_requested_m for result in pool_results.values()),
+        memory_requested_mib=sum(
+            result.memory_requested_mib for result in pool_results.values()
+        ),
+        nodes_required=sum(result.nodes_required for result in pool_results.values()),
+        effective_nodes_required=sum(
+            result.effective_nodes_required for result in pool_results.values()
+        ),
+        current_nodes=sum(result.current_nodes for result in pool_results.values()),
+        nodes_to_add=sum(result.nodes_to_add for result in pool_results.values()),
+        nodes_to_remove=sum(
+            result.nodes_to_remove for result in pool_results.values()
+        ),
+        schedulable=all(result.schedulable for result in pool_results.values()),
+        oversized_pod_count=sum(
+            result.oversized_pod_count for result in pool_results.values()
+        ),
+        pools=pool_results,
     )
 
 def min_replicas_for(
@@ -1069,6 +1192,8 @@ class ConfigDiff:
     changes: dict[str, ConfigValueChange]
     workloads_added: tuple[str, ...]
     workloads_removed: tuple[str, ...]
+    node_pools_added: tuple[str, ...]
+    node_pools_removed: tuple[str, ...]
 
 
 @dataclass(frozen=True)
@@ -1081,6 +1206,12 @@ class WorkloadDiff:
 
 @dataclass(frozen=True)
 class ScenarioDiff:
+    """Cluster-total impact changes.
+
+    Per-pool fields (headroom, limiting resource) live on PoolScenarioResult
+    and are not diffed here; a pool can appear or vanish between the two
+    configurations, which a flat before/after pair cannot express.
+    """
     pod_count: ValueChange
     cpu_requested_m: ValueChange
     memory_requested_mib: ValueChange
@@ -1089,9 +1220,6 @@ class ScenarioDiff:
     current_nodes: ValueChange
     nodes_to_add: ValueChange
     nodes_to_remove: ValueChange
-    node_headroom: ValueChange
-    limiting_resource_before: str
-    limiting_resource_after: str
     schedulable_before: bool
     schedulable_after: bool
 
@@ -1138,11 +1266,20 @@ def compare_config(
     added = tuple(sorted(new_names - old_names))
     removed = tuple(sorted(old_names - new_names))
 
-    changes = _compare_config_values(
-        baseline.node_pool,
-        candidate.node_pool,
-        "node_pool",
-    )
+    old_pools = baseline.node_pools.keys()
+    new_pools = candidate.node_pools.keys()
+    pools_added = tuple(sorted(new_pools - old_pools))
+    pools_removed = tuple(sorted(old_pools - new_pools))
+
+    changes: dict[str, ConfigValueChange] = {}
+    for name in sorted(old_pools & new_pools):
+        changes.update(
+            _compare_config_values(
+                baseline.node_pools[name],
+                candidate.node_pools[name],
+                f"node_pools.{name}",
+            )
+        )
     for name in sorted(old_names & new_names):
         changes.update(
             _compare_config_values(
@@ -1156,6 +1293,8 @@ def compare_config(
         changes=changes,
         workloads_added=added,
         workloads_removed=removed,
+        node_pools_added=pools_added,
+        node_pools_removed=pools_removed,
     )
 
 
@@ -1200,9 +1339,6 @@ def compare_results(
             current_nodes=ValueChange(old.current_nodes, new.current_nodes),
             nodes_to_add=ValueChange(old.nodes_to_add, new.nodes_to_add),
             nodes_to_remove=ValueChange(old.nodes_to_remove, new.nodes_to_remove),
-            node_headroom=ValueChange(old.node_headroom, new.node_headroom),
-            limiting_resource_before=old.limiting_resource,
-            limiting_resource_after=new.limiting_resource,
             schedulable_before=old.schedulable,
             schedulable_after=new.schedulable,
         )

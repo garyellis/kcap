@@ -39,18 +39,20 @@ def cluster_payload() -> dict[str, Any]:
                 "rollout": {"max_surge_percent": 25},
             }
         },
-        "node_pool": {
-            "name": "default",
-            "machine": {
-                "cpu_m": 4000,
-                "memory_mib": 8192,
-                "reserved_cpu_m": 200,
-                "reserved_memory_mib": 512,
-                "max_pods": 110,
+        "node_pools": {
+            "default": {
+                "name": "default",
+                "machine": {
+                    "cpu_m": 4000,
+                    "memory_mib": 8192,
+                    "reserved_cpu_m": 200,
+                    "reserved_memory_mib": 512,
+                    "max_pods": 110,
+                },
+                "min_nodes": 1,
+                "current_nodes": 2,
+                "max_nodes": 10,
             },
-            "min_nodes": 1,
-            "current_nodes": 2,
-            "max_nodes": 10,
         },
     }
 
@@ -113,7 +115,7 @@ def test_evaluate(client: TestClient, cluster_payload: dict[str, Any]) -> None:
     assert body["workloads"]["api"]["desired_replicas"] == 5
     assert body["scenarios"]["current"]["current_nodes"] == 2
     assert "effective_nodes_required" in body["scenarios"]["hpa_max"]
-    assert "limiting_resource" in body["scenarios"]["hpa_max"]
+    assert "limiting_resource" in body["scenarios"]["hpa_max"]["pools"]["default"]
 
 
 def test_compare_returns_configuration_and_impact_diffs(
@@ -144,7 +146,7 @@ def test_compare_supports_node_overhead_limits_and_multiple_workloads(
     cluster_payload: dict[str, Any],
 ) -> None:
     candidate = deepcopy(cluster_payload)
-    candidate["node_pool"]["machine"].update(
+    candidate["node_pools"]["default"]["machine"].update(
         {
             "memory_mib": 16384,
             "reserved_cpu_m": 500,
@@ -175,7 +177,7 @@ def test_compare_supports_node_overhead_limits_and_multiple_workloads(
     body = response.json()
     assert body["configuration_diff"]["workloads_added"] == ["worker"]
     assert body["configuration_diff"]["changes"][
-        "node_pool.machine.reserved_memory_mib"
+        "node_pools.default.machine.reserved_memory_mib"
     ] == {"before": 512, "after": 2048}
     assert body["candidate_result"]["scenarios"]["current"]["replicas"] == {
         "api": 4,
@@ -187,12 +189,85 @@ def test_engine_validation_is_returned_as_422(
     client: TestClient,
     cluster_payload: dict[str, Any],
 ) -> None:
-    cluster_payload["node_pool"]["machine"]["reserved_cpu_m"] = 4000
+    cluster_payload["node_pools"]["default"]["machine"]["reserved_cpu_m"] = 4000
 
     response = client.post("/v1/evaluate", json=cluster_payload)
 
     assert response.status_code == 422
-    assert "Reserved CPU must be less" in response.json()["detail"]
+    assert "reserved CPU must be less" in response.json()["detail"]
+
+
+def test_legacy_single_node_pool_payload_still_evaluates(
+    client: TestClient,
+    cluster_payload: dict[str, Any],
+) -> None:
+    legacy = deepcopy(cluster_payload)
+    legacy["node_pool"] = legacy.pop("node_pools")["default"]
+
+    legacy_body = client.post("/v1/evaluate", json=legacy)
+    current_body = client.post("/v1/evaluate", json=cluster_payload)
+
+    assert legacy_body.status_code == 200
+    assert legacy_body.json() == current_body.json()
+
+
+def test_node_pool_and_node_pools_together_are_rejected(
+    client: TestClient,
+    cluster_payload: dict[str, Any],
+) -> None:
+    cluster_payload["node_pool"] = deepcopy(
+        cluster_payload["node_pools"]["default"]
+    )
+
+    response = client.post("/v1/evaluate", json=cluster_payload)
+
+    assert response.status_code == 422
+
+
+def test_evaluate_partitions_workloads_across_pools(
+    client: TestClient,
+    cluster_payload: dict[str, Any],
+) -> None:
+    cluster_payload["node_pools"]["highmem"] = {
+        "name": "highmem",
+        "machine": {"cpu_m": 4000, "memory_mib": 32768},
+        "min_nodes": 0,
+        "current_nodes": 1,
+        "max_nodes": 5,
+    }
+    cluster_payload["workloads"]["api"]["pool"] = "default"
+    cluster_payload["workloads"]["cache"] = {
+        "name": "cache",
+        "resources": {"cpu_request_m": 250, "memory_request_mib": 8192},
+        "current_replicas": 2,
+        "pool": "highmem",
+    }
+
+    response = client.post("/v1/evaluate", json=cluster_payload)
+
+    assert response.status_code == 200
+    scenario = response.json()["scenarios"]["current"]
+    assert scenario["pools"]["default"]["pod_count"] == 4
+    assert scenario["pools"]["highmem"]["pod_count"] == 2
+    assert scenario["effective_nodes_required"] == (
+        scenario["pools"]["default"]["effective_nodes_required"]
+        + scenario["pools"]["highmem"]["effective_nodes_required"]
+    )
+
+
+def test_multiple_pools_without_an_assignment_is_a_422(
+    client: TestClient,
+    cluster_payload: dict[str, Any],
+) -> None:
+    cluster_payload["node_pools"]["gpu"] = deepcopy(
+        cluster_payload["node_pools"]["default"]
+    )
+    cluster_payload["node_pools"]["gpu"]["name"] = "gpu"
+
+    response = client.post("/v1/evaluate", json=cluster_payload)
+
+    assert response.status_code == 422
+    assert "must name a node pool" in response.json()["detail"]
 
 
 def test_request_schema_rejects_unknown_fields(

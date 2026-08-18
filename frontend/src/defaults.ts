@@ -1,4 +1,4 @@
-import type { ClusterConfig, Workload } from './api'
+import type { ClusterConfig, NodePool, Workload } from './api'
 
 export const BASELINE: ClusterConfig = {
   workloads: {
@@ -20,6 +20,7 @@ export const BASELINE: ClusterConfig = {
         memory_target_percentage: 75,
       },
       rollout: { max_surge_percent: 25 },
+      pool: 'primary',
     },
     worker: {
       name: 'worker',
@@ -39,20 +40,23 @@ export const BASELINE: ClusterConfig = {
         memory_target_percentage: null,
       },
       rollout: { max_surge_percent: 25 },
+      pool: 'primary',
     },
   },
-  node_pool: {
-    name: 'primary',
-    machine: {
-      cpu_m: 4000,
-      memory_mib: 16384,
-      reserved_cpu_m: 400,
-      reserved_memory_mib: 1536,
-      max_pods: 110,
+  node_pools: {
+    primary: {
+      name: 'primary',
+      machine: {
+        cpu_m: 4000,
+        memory_mib: 16384,
+        reserved_cpu_m: 400,
+        reserved_memory_mib: 1536,
+        max_pods: 110,
+      },
+      min_nodes: 3,
+      current_nodes: 6,
+      max_nodes: 20,
     },
-    min_nodes: 3,
-    current_nodes: 6,
-    max_nodes: 20,
   },
 }
 
@@ -60,7 +64,7 @@ export function cloneBaseline(): ClusterConfig {
   return structuredClone(BASELINE)
 }
 
-export function createWorkload(name: string): Workload {
+export function createWorkload(name: string, pool: string): Workload {
   return {
     name,
     resources: {
@@ -79,6 +83,23 @@ export function createWorkload(name: string): Workload {
       memory_target_percentage: null,
     },
     rollout: { max_surge_percent: 25 },
+    pool,
+  }
+}
+
+export function createPool(name: string): NodePool {
+  return {
+    name,
+    machine: {
+      cpu_m: 4000,
+      memory_mib: 16384,
+      reserved_cpu_m: 400,
+      reserved_memory_mib: 1536,
+      max_pods: 110,
+    },
+    min_nodes: 0,
+    current_nodes: 0,
+    max_nodes: 10,
   }
 }
 
@@ -88,6 +109,16 @@ export function nextWorkloadName(workloads: ClusterConfig['workloads']): string 
   while (name in workloads) {
     index += 1
     name = `service-${index}`
+  }
+  return name
+}
+
+export function nextPoolName(pools: ClusterConfig['node_pools']): string {
+  let index = Object.keys(pools).length + 1
+  let name = `pool-${index}`
+  while (name in pools) {
+    index += 1
+    name = `pool-${index}`
   }
   return name
 }

@@ -2,9 +2,9 @@ import { useEffect, useMemo, useState } from 'react'
 import type { ReactNode } from 'react'
 import './App.css'
 import { compareClusters } from './api'
-import type { ClusterConfig, CompareResponse, ScenarioResult, Workload, WorkloadResult } from './api'
+import type { ClusterConfig, CompareResponse, NodePool, PoolScenarioResult, Workload, WorkloadResult } from './api'
 import { NumberField, TextField, Toggle } from './components/Fields'
-import { BASELINE, cloneBaseline, createWorkload, nextWorkloadName } from './defaults'
+import { BASELINE, cloneBaseline, createPool, createWorkload, nextPoolName, nextWorkloadName } from './defaults'
 
 const SCENARIOS = [
   ['hpa_min', 'HPA min'],
@@ -16,6 +16,8 @@ const SCENARIOS = [
 
 type ScenarioName = (typeof SCENARIOS)[number][0]
 type WorkloadUpdater = (workload: Workload) => Workload
+// The editor panel shows either one node pool or one workload.
+type Selection = { kind: 'pool'; name: string } | { kind: 'workload'; name: string }
 
 function formatCpu(value: number): string {
   if (value >= 1000) return `${(value / 1000).toFixed(value % 1000 === 0 ? 0 : 1)} cores`
@@ -56,7 +58,7 @@ const SHORT_RESOURCE: Record<string, string> = { cpu: 'CPU', memory: 'MEM', pod_
 
 // The constraint tile is one short line in a four-column grid, so the verdict
 // goes in the chip and the evidence goes in the note.
-function describeConstraint(scenario?: ScenarioResult): { label: string; note: string; tone: 'neutral' | 'warn' } {
+function describeConstraint(scenario?: PoolScenarioResult): { label: string; note: string; tone: 'neutral' | 'warn' } {
   if (!scenario) return { label: '—', note: 'dominant pressure', tone: 'neutral' }
 
   const perNode = scenario.pods_per_node
@@ -135,7 +137,7 @@ function BarScale() {
   )
 }
 
-function NodeMap({ scenario, maxNodes }: { scenario: ScenarioResult; maxNodes: number }) {
+function NodeMap({ scenario, maxNodes }: { scenario: PoolScenarioResult; maxNodes: number }) {
   // Required nodes must always be drawn; only unused headroom collapses into
   // the overflow badge.
   const shown = Math.min(maxNodes, Math.max(24, scenario.effective_nodes_required))
@@ -161,18 +163,30 @@ function NodeMap({ scenario, maxNodes }: { scenario: ScenarioResult; maxNodes: n
 }
 
 function PoolEditor({
-  config,
+  pool,
+  assignedWorkloads,
+  poolCount,
   updatePool,
   updateMachine,
+  rename,
+  duplicate,
+  remove,
 }: {
-  config: ClusterConfig
-  updatePool: (patch: Partial<ClusterConfig['node_pool']>) => void
-  updateMachine: (patch: Partial<ClusterConfig['node_pool']['machine']>) => void
+  pool: NodePool
+  assignedWorkloads: number
+  poolCount: number
+  updatePool: (patch: Partial<NodePool>) => void
+  updateMachine: (patch: Partial<NodePool['machine']>) => void
+  rename: (name: string) => boolean
+  duplicate: () => void
+  remove: () => void
 }) {
-  const { node_pool: pool } = config
   const machine = pool.machine
   const allocatableCpu = machine.cpu_m - machine.reserved_cpu_m
   const allocatableMemory = machine.memory_mib - machine.reserved_memory_mib
+  // Deleting a referenced pool would orphan those workloads' assignments;
+  // reassign first.
+  const removeBlocked = poolCount <= 1 || assignedWorkloads > 0
 
   return (
     <div className="editor-view">
@@ -182,6 +196,18 @@ function PoolEditor({
           <h2>{pool.name}</h2>
           <p>Define raw node capacity, fixed platform overhead, and the autoscaler envelope.</p>
         </div>
+        <div className="editor-actions">
+          <button type="button" onClick={duplicate}>Duplicate</button>
+          <button
+            className="danger-button"
+            type="button"
+            disabled={removeBlocked}
+            title={removeBlocked && poolCount > 1 ? `${assignedWorkloads} workload${assignedWorkloads === 1 ? '' : 's'} still assigned` : undefined}
+            onClick={remove}
+          >
+            Remove
+          </button>
+        </div>
       </header>
 
       <section className="form-section">
@@ -190,7 +216,7 @@ function PoolEditor({
           <p>Physical or virtual resources available on every node.</p>
         </div>
         <div className="field-grid field-grid--three">
-          <TextField label="Pool name" value={pool.name} onCommit={(name) => { updatePool({ name }); return true }} hint="Cluster autoscaler node group" />
+          <TextField label="Pool name" value={pool.name} onCommit={rename} hint="Cluster autoscaler node group" />
           <NumberField label="Node CPU" sliderMin={1000} sliderMax={32000} value={machine.cpu_m} min={machine.reserved_cpu_m + 100} max={128000} step={100} unit="mCPU" onChange={(cpu_m) => updateMachine({ cpu_m })} hint="Raw capacity before reservation" />
           <NumberField label="Node memory" sliderMin={1024} sliderMax={131072} value={machine.memory_mib} min={machine.reserved_memory_mib + 128} max={1048576} step={128} unit="MiB" onChange={(memory_mib) => updateMachine({ memory_mib })} hint="Raw capacity before reservation" />
         </div>
@@ -235,6 +261,7 @@ function WorkloadEditor({
   workload,
   result,
   workloadCount,
+  poolNames,
   update,
   rename,
   duplicate,
@@ -243,6 +270,7 @@ function WorkloadEditor({
   workload: Workload
   result: WorkloadResult | undefined
   workloadCount: number
+  poolNames: string[]
   update: (updater: WorkloadUpdater) => void
   rename: (name: string) => boolean
   duplicate: () => void
@@ -300,6 +328,24 @@ function WorkloadEditor({
         </div>
         <div className="field-grid field-grid--four field-grid--continuation">
           <NumberField label="Rollout max surge" sliderMax={100} value={workload.rollout.max_surge_percent} min={0} max={500} step={5} unit="%" onChange={(max_surge_percent) => update((current) => ({ ...current, rollout: { max_surge_percent } }))} hint="Applied at HPA maximum" />
+          {poolNames.length > 1 && (
+            <label className="field">
+              <span className="field-label">Node pool</span>
+              <span className="field-input-wrap">
+                <select
+                  value={workload.pool ?? poolNames[0]}
+                  onChange={(event) => {
+                    const pool = event.target.value
+                    update((current) => ({ ...current, pool }))
+                  }}
+                >
+                  {poolNames.map((name) => <option key={name} value={name}>{name}</option>)}
+                </select>
+              </span>
+              <span className="slider-spacer" aria-hidden="true" />
+              <small>Pods pack onto this pool only</small>
+            </label>
+          )}
         </div>
       </section>
 
@@ -421,6 +467,16 @@ function ResultsPanel({
   const scenario = comparison?.candidate_result.scenarios[scenarioName]
   const baselineScenario = comparison?.baseline_result.scenarios[scenarioName]
 
+  const poolNames = Object.keys(candidate.node_pools)
+  const multiPool = poolNames.length > 1
+  const [selectedPool, setSelectedPool] = useState(poolNames[0])
+  // A removed or renamed pool must not strand the tab selection.
+  const activePool = poolNames.includes(selectedPool) ? selectedPool : poolNames[0]
+  // A result can briefly describe the previous pool set while an edit is
+  // inside the debounce window.
+  const poolScenario = scenario ? scenario.pools[activePool] ?? Object.values(scenario.pools)[0] : undefined
+  const activePoolConfig = candidate.node_pools[poolScenario?.pool ?? activePool] ?? candidate.node_pools[activePool]
+
   const limits = useMemo(() => {
     if (!scenario) return null
     let cpu = 0
@@ -445,19 +501,28 @@ function ResultsPanel({
   // An oversized pod is not a capacity shortfall, so the autoscaler has no
   // action that resolves it. Reporting "+N" there reads as an instruction that
   // would not help.
-  const blockedByPodShape = (scenario?.oversized_pod_count ?? 0) > 0
+  const blockedByPodShape = (poolScenario?.oversized_pod_count ?? 0) > 0
   const action = blockedByPodShape
     ? 'None'
-    : scenario?.nodes_to_add
-      ? `+${scenario.nodes_to_add}`
-      : scenario?.nodes_to_remove
-        ? `−${scenario.nodes_to_remove}`
+    : poolScenario?.nodes_to_add
+      ? `+${poolScenario.nodes_to_add}`
+      : poolScenario?.nodes_to_remove
+        ? `−${poolScenario.nodes_to_remove}`
         : 'Hold'
-  const actionClass = blockedByPodShape ? 'is-hold' : scenario?.nodes_to_add ? 'is-add' : scenario?.nodes_to_remove ? 'is-remove' : 'is-hold'
+  const actionClass = blockedByPodShape ? 'is-hold' : poolScenario?.nodes_to_add ? 'is-add' : poolScenario?.nodes_to_remove ? 'is-remove' : 'is-hold'
   const actionNote = blockedByPodShape ? 'no fix' : action === 'Hold' ? 'steady' : 'nodes'
 
-  const constraint = describeConstraint(scenario)
+  const constraint = describeConstraint(poolScenario)
   const deltaNodes = scenario ? scenario.effective_nodes_required - (baselineScenario?.effective_nodes_required ?? scenario.effective_nodes_required) : 0
+  const totalAction = scenario
+    ? scenario.oversized_pod_count > 0
+      ? 'None'
+      : scenario.nodes_to_add
+        ? `+${scenario.nodes_to_add}`
+        : scenario.nodes_to_remove
+          ? `−${scenario.nodes_to_remove}`
+          : 'Hold'
+    : '—'
 
   return (
     <aside className={`results-panel${stale ? ' is-stale' : ''}`}>
@@ -484,46 +549,64 @@ function ResultsPanel({
         ))}
       </nav>
 
-      {scenario ? (
+      {multiPool && (
+        <>
+          <div className="stat-strip stat-strip--3 pool-totals">
+            <div><span>All pools</span><strong className="num">{scenario?.effective_nodes_required ?? '—'} nodes</strong><small>{scenario ? `${scenario.pod_count} pods · ${poolNames.length} pools` : 'summed target'}</small></div>
+            <div><span>CA action</span><strong className="num">{totalAction}</strong><small>summed across pools</small></div>
+            <div><span>Verdict</span><strong>{scenario ? (scenario.schedulable ? 'Clear' : 'Blocked') : '—'}</strong><small>{scenario && !scenario.schedulable ? 'a pool is blocked' : 'every pool fits'}</small></div>
+          </div>
+          <nav className="segmented segmented--pools" aria-label="Node pool">
+            {poolNames.map((name) => (
+              <button key={name} className={activePool === name ? 'is-active' : ''} onClick={() => setSelectedPool(name)} type="button">
+                <span>{name}</span>
+                <small>{scenario?.pools[name]?.effective_nodes_required ?? '—'} nodes</small>
+              </button>
+            ))}
+          </nav>
+        </>
+      )}
+
+      {scenario && poolScenario && activePoolConfig ? (
         <div className="result-content">
-          <section className={`verdict verdict--${scenario.schedulable ? 'clear' : 'blocked'}`}>
+          <section className={`verdict verdict--${poolScenario.schedulable ? 'clear' : 'blocked'}`}>
             <div>
-              <span>Scheduler verdict</span>
-              <strong><i className="verdict-dot" />{scenario.schedulable ? 'Capacity clear' : 'Capacity blocked'}</strong>
-              <p>{scenario.schedulable
+              <span>{multiPool ? `Verdict · ${poolScenario.pool}` : 'Scheduler verdict'}</span>
+              <strong><i className="verdict-dot" />{poolScenario.schedulable ? 'Capacity clear' : 'Capacity blocked'}</strong>
+              <p>{poolScenario.schedulable
                 ? 'All pods fit within the autoscaler envelope.'
                 : blockedByPodShape
-                  ? `${scenario.oversized_pod_count} pod${scenario.oversized_pod_count === 1 ? '' : 's'} request more than one whole node. No node count places them.`
+                  ? `${poolScenario.oversized_pod_count} pod${poolScenario.oversized_pod_count === 1 ? '' : 's'} request more than one whole node. No node count places them.`
                   : 'A placement constraint exceeds the configured envelope.'}</p>
             </div>
             <div className="verdict-action"><span>CA action</span><b className={actionClass}>{action}</b><small>{actionNote}</small></div>
           </section>
 
           <div className="metric-grid">
-            <Metric label="Placement" value={scenario.nodes_required} note="nodes to hold the pods" />
-            <Metric label="Effective target" value={scenario.effective_nodes_required} note={`after CA minimum ${candidate.node_pool.min_nodes}`} />
-            <Metric label="Headroom" value={scenario.node_headroom} note={`CA max ${candidate.node_pool.max_nodes}`} />
+            <Metric label="Placement" value={poolScenario.nodes_required} note="nodes to hold the pods" />
+            <Metric label="Effective target" value={poolScenario.effective_nodes_required} note={`after CA minimum ${activePoolConfig.min_nodes}`} />
+            <Metric label="Headroom" value={poolScenario.node_headroom} note={`CA max ${activePoolConfig.max_nodes}`} />
             <Metric label="Constraint" value={<span className={`chip${constraint.tone === 'warn' ? ' chip--warn' : ''}`}>{constraint.label}</span>} note={constraint.note} />
           </div>
 
           <section className="result-section">
-            <div className="result-section-heading"><span>Request saturation</span><small>{scenario.effective_nodes_required} × node allocatable</small></div>
-            <CapacityBar label="CPU" value={scenario.cpu_requested_m} capacity={scenario.capacity_cpu_m} stranded={scenario.stranded_cpu_m} blocked={!scenario.schedulable} display={formatCpu} />
-            <CapacityBar label="Memory" value={scenario.memory_requested_mib} capacity={scenario.capacity_memory_mib} stranded={scenario.stranded_memory_mib} blocked={!scenario.schedulable} display={formatMemory} />
+            <div className="result-section-heading"><span>Request saturation</span><small>{poolScenario.effective_nodes_required} × node allocatable</small></div>
+            <CapacityBar label="CPU" value={poolScenario.cpu_requested_m} capacity={poolScenario.capacity_cpu_m} stranded={poolScenario.stranded_cpu_m} blocked={!poolScenario.schedulable} display={formatCpu} />
+            <CapacityBar label="Memory" value={poolScenario.memory_requested_mib} capacity={poolScenario.capacity_memory_mib} stranded={poolScenario.stranded_memory_mib} blocked={!poolScenario.schedulable} display={formatMemory} />
             <BarScale />
-            {scenario.pods_per_node !== null && (
+            {poolScenario.pods_per_node !== null && (
               <p className="saturation-note">
-                Provisioned capacity, not the live pool. {scenario.pods_per_node === 1
+                Provisioned capacity, not the live pool. {poolScenario.pods_per_node === 1
                   ? 'Only one pod fits per node'
-                  : `${scenario.pods_per_node} pods fit per node`} at this shape, so the remainder cannot be
+                  : `${poolScenario.pods_per_node} pods fit per node`} at this shape, so the remainder cannot be
                 filled without changing requests or node size.
               </p>
             )}
           </section>
 
           <section className="result-section">
-            <div className="result-section-heading"><span>Node envelope</span><small>min {candidate.node_pool.min_nodes} · now {scenario.current_nodes} · max {candidate.node_pool.max_nodes}</small></div>
-            <NodeMap scenario={scenario} maxNodes={candidate.node_pool.max_nodes} />
+            <div className="result-section-heading"><span>Node envelope</span><small>min {activePoolConfig.min_nodes} · now {poolScenario.current_nodes} · max {activePoolConfig.max_nodes}</small></div>
+            <NodeMap scenario={poolScenario} maxNodes={activePoolConfig.max_nodes} />
             <div className="legend"><span><i className="node--active" /> retained</span><span><i className="node--add" /> add</span><span><i className="node--remove" /> remove</span><span><i className="node--free" /> headroom</span></div>
           </section>
 
@@ -567,7 +650,7 @@ function App() {
   // manual mode holds it until "Run simulation".
   const [submitted, setSubmitted] = useState<ClusterConfig>(candidate)
   const [autoRun, setAutoRun] = useState(true)
-  const [selectedWorkload, setSelectedWorkload] = useState<string | null>('api')
+  const [selection, setSelection] = useState<Selection>({ kind: 'workload', name: 'api' })
   const [comparison, setComparison] = useState<CompareResponse | null>(null)
   const [scenarioName, setScenarioName] = useState<ScenarioName>('hpa_desired')
   const [status, setStatus] = useState<'connecting' | 'live' | 'error'>('connecting')
@@ -618,15 +701,97 @@ function App() {
     return () => window.removeEventListener('keydown', onKey)
   }, [autoRun, candidate])
 
-  const updatePool = (patch: Partial<ClusterConfig['node_pool']>) => {
-    setCandidate((current) => ({ ...current, node_pool: { ...current.node_pool, ...patch } }))
-  }
-
-  const updateMachine = (patch: Partial<ClusterConfig['node_pool']['machine']>) => {
+  const updatePool = (poolName: string, patch: Partial<NodePool>) => {
     setCandidate((current) => ({
       ...current,
-      node_pool: { ...current.node_pool, machine: { ...current.node_pool.machine, ...patch } },
+      node_pools: { ...current.node_pools, [poolName]: { ...current.node_pools[poolName], ...patch } },
     }))
+  }
+
+  const updateMachine = (poolName: string, patch: Partial<NodePool['machine']>) => {
+    setCandidate((current) => {
+      const pool = current.node_pools[poolName]
+      return {
+        ...current,
+        node_pools: { ...current.node_pools, [poolName]: { ...pool, machine: { ...pool.machine, ...patch } } },
+      }
+    })
+  }
+
+  const renamePool = (oldName: string, newName: string): boolean => {
+    if (newName !== oldName && newName in candidate.node_pools) return false
+    if (newName === oldName) return true
+    setCandidate((current) => {
+      const node_pools = { ...current.node_pools }
+      const pool = node_pools[oldName]
+      delete node_pools[oldName]
+      node_pools[newName] = { ...pool, name: newName }
+      // Assignments follow the pool through a rename.
+      const workloads = Object.fromEntries(
+        Object.entries(current.workloads).map(([name, workload]) => [
+          name,
+          workload.pool === oldName ? { ...workload, pool: newName } : workload,
+        ]),
+      )
+      return { ...current, node_pools, workloads }
+    })
+    setSelection({ kind: 'pool', name: newName })
+    return true
+  }
+
+  const addPool = () => {
+    const name = nextPoolName(candidate.node_pools)
+    setCandidate((current) => {
+      // Implicit single-pool assignments become explicit before a second pool
+      // makes them ambiguous.
+      const soleName = Object.keys(current.node_pools).length === 1 ? Object.keys(current.node_pools)[0] : null
+      const workloads = soleName
+        ? Object.fromEntries(
+            Object.entries(current.workloads).map(([workloadName, workload]) => [
+              workloadName,
+              workload.pool === null ? { ...workload, pool: soleName } : workload,
+            ]),
+          )
+        : current.workloads
+      return { ...current, workloads, node_pools: { ...current.node_pools, [name]: createPool(name) } }
+    })
+    setSelection({ kind: 'pool', name })
+  }
+
+  const duplicatePool = (name: string) => {
+    const nextName = nextPoolName(candidate.node_pools)
+    setCandidate((current) => {
+      const soleName = Object.keys(current.node_pools).length === 1 ? Object.keys(current.node_pools)[0] : null
+      const workloads = soleName
+        ? Object.fromEntries(
+            Object.entries(current.workloads).map(([workloadName, workload]) => [
+              workloadName,
+              workload.pool === null ? { ...workload, pool: soleName } : workload,
+            ]),
+          )
+        : current.workloads
+      return {
+        ...current,
+        workloads,
+        node_pools: {
+          ...current.node_pools,
+          [nextName]: { ...structuredClone(current.node_pools[name]), name: nextName },
+        },
+      }
+    })
+    setSelection({ kind: 'pool', name: nextName })
+  }
+
+  const removePool = (name: string) => {
+    const poolNames = Object.keys(candidate.node_pools)
+    if (poolNames.length <= 1) return
+    if (Object.values(candidate.workloads).some((workload) => workload.pool === name)) return
+    setCandidate((current) => {
+      const node_pools = { ...current.node_pools }
+      delete node_pools[name]
+      return { ...current, node_pools }
+    })
+    setSelection({ kind: 'pool', name: poolNames.find((item) => item !== name) ?? poolNames[0] })
   }
 
   const updateWorkload = (name: string, updater: WorkloadUpdater) => {
@@ -646,14 +811,17 @@ function App() {
       workloads[newName] = { ...workload, name: newName }
       return { ...current, workloads }
     })
-    setSelectedWorkload(newName)
+    setSelection({ kind: 'workload', name: newName })
     return true
   }
 
   const addWorkload = () => {
     const name = nextWorkloadName(candidate.workloads)
-    setCandidate((current) => ({ ...current, workloads: { ...current.workloads, [name]: createWorkload(name) } }))
-    setSelectedWorkload(name)
+    const pool = selection.kind === 'pool' && selection.name in candidate.node_pools
+      ? selection.name
+      : Object.keys(candidate.node_pools)[0]
+    setCandidate((current) => ({ ...current, workloads: { ...current.workloads, [name]: createWorkload(name, pool) } }))
+    setSelection({ kind: 'workload', name })
   }
 
   const duplicateWorkload = (name: string) => {
@@ -662,31 +830,43 @@ function App() {
       ...current,
       workloads: { ...current.workloads, [nextName]: { ...structuredClone(current.workloads[name]), name: nextName } },
     }))
-    setSelectedWorkload(nextName)
+    setSelection({ kind: 'workload', name: nextName })
   }
 
   const removeWorkload = (name: string) => {
     if (Object.keys(candidate.workloads).length <= 1) return
+    const nextSelected = Object.keys(candidate.workloads).find((item) => item !== name)
     setCandidate((current) => {
       const workloads = { ...current.workloads }
       delete workloads[name]
       return { ...current, workloads }
     })
-    setSelectedWorkload(Object.keys(candidate.workloads).find((item) => item !== name) ?? null)
+    setSelection(nextSelected
+      ? { kind: 'workload', name: nextSelected }
+      : { kind: 'pool', name: Object.keys(candidate.node_pools)[0] })
   }
 
   const reset = () => {
     const next = cloneBaseline()
     setCandidate(next)
     setSubmitted(next)
-    setSelectedWorkload('api')
+    setSelection({ kind: 'workload', name: 'api' })
   }
 
   const configDiff = comparison?.configuration_diff
   const changeCount = configDiff
-    ? Object.keys(configDiff.changes).length + configDiff.workloads_added.length + configDiff.workloads_removed.length
+    ? Object.keys(configDiff.changes).length
+      + configDiff.workloads_added.length
+      + configDiff.workloads_removed.length
+      + configDiff.node_pools_added.length
+      + configDiff.node_pools_removed.length
     : 0
-  const selected = selectedWorkload ? candidate.workloads[selectedWorkload] : null
+  const poolNames = Object.keys(candidate.node_pools)
+  const selectedWorkload = selection.kind === 'workload' ? candidate.workloads[selection.name] : undefined
+  // A stale selection (removed entry) falls back to the first pool.
+  const selectedPool = selection.kind === 'pool'
+    ? candidate.node_pools[selection.name] ?? candidate.node_pools[poolNames[0]]
+    : candidate.node_pools[poolNames[0]]
 
   return (
     <div className="app-shell">
@@ -695,7 +875,7 @@ function App() {
           <HelmMark />
           <div className="brand-copy"><h1>KCAP</h1><p>Capacity planner</p></div>
         </div>
-        <div className="topbar-center"><strong>{candidate.node_pool.name}</strong> · {Object.keys(candidate.workloads).length} workloads</div>
+        <div className="topbar-center"><strong>{poolNames.length === 1 ? poolNames[0] : `${poolNames.length} node pools`}</strong> · {Object.keys(candidate.workloads).length} workloads</div>
         <div className="topbar-meta">
           <span className={`connection connection--${status}`}><i />{status === 'live' ? 'Live' : status === 'error' ? 'Engine offline' : 'Calculating'}</span>
           <span className="revision">Model v1.1</span>
@@ -708,19 +888,28 @@ function App() {
         <aside className="catalog-panel">
           <div className="catalog-heading"><span>Configuration</span><button type="button" onClick={reset}>Reset</button></div>
           <div className="catalog-group">
-            <span className="catalog-label">Infrastructure</span>
-            <button className={`catalog-item ${selectedWorkload === null ? 'is-active' : ''}`} type="button" onClick={() => setSelectedWorkload(null)}>
-              <strong>{candidate.node_pool.name}</strong>
-              <small>{candidate.node_pool.current_nodes} nodes · {formatCpu(candidate.node_pool.machine.cpu_m)} · {formatMemory(candidate.node_pool.machine.memory_mib)}</small>
-            </button>
+            <div className="catalog-label-row"><span className="catalog-label">Node pools · {poolNames.length}</span><button type="button" onClick={addPool} aria-label="Add node pool">＋</button></div>
+            <div className="workload-list">
+              {Object.entries(candidate.node_pools).map(([name, pool]) => (
+                <button
+                  className={`catalog-item ${selection.kind === 'pool' && selection.name === name ? 'is-active' : ''}`}
+                  type="button"
+                  key={name}
+                  onClick={() => setSelection({ kind: 'pool', name })}
+                >
+                  <strong>{name}</strong>
+                  <small>{pool.current_nodes} nodes · {formatCpu(pool.machine.cpu_m)} · {formatMemory(pool.machine.memory_mib)}</small>
+                </button>
+              ))}
+            </div>
           </div>
           <div className="catalog-group">
             <div className="catalog-label-row"><span className="catalog-label">Workloads · {Object.keys(candidate.workloads).length}</span><button type="button" onClick={addWorkload} aria-label="Add workload">＋</button></div>
             <div className="workload-list">
               {Object.entries(candidate.workloads).map(([name, workload]) => (
-                <button className={`catalog-item ${selectedWorkload === name ? 'is-active' : ''}`} type="button" key={name} onClick={() => setSelectedWorkload(name)}>
+                <button className={`catalog-item ${selection.kind === 'workload' && selection.name === name ? 'is-active' : ''}`} type="button" key={name} onClick={() => setSelection({ kind: 'workload', name })}>
                   <strong>{name}</strong>
-                  <small>{workload.current_replicas} pods · {formatCpu(workload.resources.cpu_request_m)} · {formatMemory(workload.resources.memory_request_mib)}</small>
+                  <small>{workload.current_replicas} pods · {formatCpu(workload.resources.cpu_request_m)} · {formatMemory(workload.resources.memory_request_mib)}{poolNames.length > 1 && workload.pool ? ` · ${workload.pool}` : ''}</small>
                 </button>
               ))}
             </div>
@@ -730,18 +919,28 @@ function App() {
         </aside>
 
         <section className="editor-panel">
-          {selected ? (
+          {selectedWorkload ? (
             <WorkloadEditor
-              workload={selected}
-              result={comparison?.candidate_result.workloads[selected.name]}
+              workload={selectedWorkload}
+              result={comparison?.candidate_result.workloads[selectedWorkload.name]}
               workloadCount={Object.keys(candidate.workloads).length}
-              update={(updater) => updateWorkload(selected.name, updater)}
-              rename={(name) => renameWorkload(selected.name, name)}
-              duplicate={() => duplicateWorkload(selected.name)}
-              remove={() => removeWorkload(selected.name)}
+              poolNames={poolNames}
+              update={(updater) => updateWorkload(selectedWorkload.name, updater)}
+              rename={(name) => renameWorkload(selectedWorkload.name, name)}
+              duplicate={() => duplicateWorkload(selectedWorkload.name)}
+              remove={() => removeWorkload(selectedWorkload.name)}
             />
           ) : (
-            <PoolEditor config={candidate} updatePool={updatePool} updateMachine={updateMachine} />
+            <PoolEditor
+              pool={selectedPool}
+              assignedWorkloads={Object.values(candidate.workloads).filter((workload) => workload.pool === selectedPool.name).length}
+              poolCount={poolNames.length}
+              updatePool={(patch) => updatePool(selectedPool.name, patch)}
+              updateMachine={(patch) => updateMachine(selectedPool.name, patch)}
+              rename={(name) => renamePool(selectedPool.name, name)}
+              duplicate={() => duplicatePool(selectedPool.name)}
+              remove={() => removePool(selectedPool.name)}
+            />
           )}
         </section>
 

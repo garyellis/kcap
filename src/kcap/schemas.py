@@ -2,7 +2,7 @@
 
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from . import engine
 
@@ -76,6 +76,14 @@ class WorkloadSchema(ApiModel):
     )
     hpa: HpaSchema | None = None
     rollout: RolloutSchema = Field(default_factory=RolloutSchema)
+    pool: str | None = Field(
+        default=None,
+        min_length=1,
+        description=(
+            "Node pool this workload is pinned to. May be omitted only when "
+            "the cluster has a single pool."
+        ),
+    )
 
     def to_domain(self) -> engine.Workload:
         return engine.Workload(
@@ -86,6 +94,7 @@ class WorkloadSchema(ApiModel):
             observed_memory_per_pod_mib=self.observed_memory_per_pod_mib,
             hpa=self.hpa.to_domain() if self.hpa is not None else None,
             rollout=self.rollout.to_domain(),
+            pool=self.pool,
         )
 
 
@@ -143,12 +152,36 @@ class ClusterConfigSchema(ApiModel):
         min_length=1,
         description="Workloads keyed by their unique name.",
     )
-    node_pool: NodePoolSchema
+    node_pools: dict[str, NodePoolSchema] = Field(
+        min_length=1,
+        description="Node pools keyed by their unique name.",
+    )
+
+    @model_validator(mode="before")
+    @classmethod
+    def _accept_legacy_node_pool(cls, data: Any) -> Any:
+        """Normalize the pre-multi-pool `node_pool` key into `node_pools`.
+
+        Runs before field validation because extra="forbid" would otherwise
+        reject the legacy key outright.
+        """
+        if not isinstance(data, dict) or "node_pool" not in data:
+            return data
+        if "node_pools" in data:
+            raise ValueError("Provide node_pools or the legacy node_pool, not both")
+
+        data = dict(data)
+        pool = data.pop("node_pool")
+        name = pool.get("name") if isinstance(pool, dict) else None
+        if not isinstance(name, str) or not name:
+            raise ValueError("node_pool.name is required")
+        data["node_pools"] = {name: pool}
+        return data
 
     def to_domain(self) -> engine.ClusterConfig:
         return engine.ClusterConfig(
             workloads={name: workload.to_domain() for name, workload in self.workloads.items()},
-            node_pool=self.node_pool.to_domain(),
+            node_pools={name: pool.to_domain() for name, pool in self.node_pools.items()},
         )
 
 
@@ -164,9 +197,8 @@ class WorkloadResultSchema(ApiModel):
     rollout_replicas_at_max: int
 
 
-class ScenarioResultSchema(ApiModel):
-    name: str
-    replicas: dict[str, int]
+class PoolScenarioResultSchema(ApiModel):
+    pool: str
     pod_count: int
     cpu_requested_m: int
     memory_requested_mib: int
@@ -185,6 +217,22 @@ class ScenarioResultSchema(ApiModel):
     oversized_pod_count: int
     pods_per_node: int | None
     fragmentation_resource: str | None
+
+
+class ScenarioResultSchema(ApiModel):
+    name: str
+    replicas: dict[str, int]
+    pod_count: int
+    cpu_requested_m: int
+    memory_requested_mib: int
+    nodes_required: int
+    effective_nodes_required: int
+    current_nodes: int
+    nodes_to_add: int
+    nodes_to_remove: int
+    schedulable: bool
+    oversized_pod_count: int
+    pools: dict[str, PoolScenarioResultSchema]
 
 
 class ClusterResultSchema(ApiModel):
@@ -207,6 +255,8 @@ class ConfigDiffSchema(ApiModel):
     changes: dict[str, ConfigValueChangeSchema]
     workloads_added: tuple[str, ...]
     workloads_removed: tuple[str, ...]
+    node_pools_added: tuple[str, ...]
+    node_pools_removed: tuple[str, ...]
 
 
 class WorkloadDiffSchema(ApiModel):
@@ -225,9 +275,6 @@ class ScenarioDiffSchema(ApiModel):
     current_nodes: ValueChangeSchema
     nodes_to_add: ValueChangeSchema
     nodes_to_remove: ValueChangeSchema
-    node_headroom: ValueChangeSchema
-    limiting_resource_before: str
-    limiting_resource_after: str
     schedulable_before: bool
     schedulable_after: bool
 

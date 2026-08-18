@@ -29,13 +29,13 @@ Then open http://localhost:8000. Interactive API docs are at `/docs`.
 
 ## The model
 
-You describe one node pool — machine size, per-node reserved CPU and memory, `max_pods`, and min/current/max node counts — plus any number of workloads with per-pod requests, current replicas, observed per-pod usage, an optional HPA, and a rollout max-surge. CPU is millicores, memory is MiB.
+You describe one or more node pools — each with a machine size, per-node reserved CPU and memory, `max_pods`, and min/current/max node counts — plus any number of workloads with per-pod requests, current replicas, observed per-pod usage, an optional HPA, and a rollout max-surge. Each workload is pinned to one pool (the assignment may be omitted only when there is a single pool). CPU is millicores, memory is MiB.
 
 Every evaluation runs the same cluster through five scenarios: `hpa_min`, `current`, `hpa_desired`, `hpa_max`, and `hpa_max_rollout`.
 
 HPA math follows Kubernetes. Utilization is `usage / request` per pod, each configured metric produces its own replica recommendation, the highest one wins, and a ratio within 10% of target holds steady — the same tolerance band as `--horizontal-pod-autoscaler-tolerance`. Results carry both the raw recommendation and the one clamped to min/max, so a saturated HPA is visible instead of quietly capped.
 
-Placement is first-fit-decreasing bin packing against allocatable capacity (`machine - reserved`) and `max_pods`. When packing needs more nodes than aggregate division would, the scenario's limiting resource is reported as `fragmentation` and names the dimension responsible. Pods too large for an empty node are pulled out and counted separately rather than papered over with more nodes.
+Placement is first-fit-decreasing bin packing against allocatable capacity (`machine - reserved`) and `max_pods`, run independently per pool. Each scenario reports every pool's node math (target, headroom, limiting resource) plus cluster totals summed across pools. When packing needs more nodes than aggregate division would, the pool's limiting resource is reported as `fragmentation` and names the dimension responsible. Pods too large for an empty node are pulled out and counted separately rather than papered over with more nodes.
 
 ## API
 
@@ -49,7 +49,7 @@ POST /v1/compare     {baseline, candidate} -> both results, the config diff, the
 
 ## What it doesn't model
 
-One node pool of one machine type. No topology spread, anti-affinity, taints, or PDBs. DaemonSets exist only as flat per-node reserved CPU and memory — they don't consume a `max_pods` slot. Observed per-pod usage is held constant across all five scenarios rather than redistributed as replica counts change, so the HPA scenarios show the shape of the response, not a converged steady state. And first-fit-decreasing is a heuristic: the real scheduler will sometimes do better and sometimes worse.
+Workloads are statically assigned to pools — there is no cross-pool spillover, and taints, tolerations, and affinity (the mechanisms that produce such an assignment in a real cluster) are not simulated. No topology spread, anti-affinity, or PDBs. DaemonSets exist only as flat per-node reserved CPU and memory — they don't consume a `max_pods` slot. Observed per-pod usage is held constant across all five scenarios rather than redistributed as replica counts change, so the HPA scenarios show the shape of the response, not a converged steady state. And first-fit-decreasing is a heuristic: the real scheduler will sometimes do better and sometimes worse.
 
 ## Checks
 

@@ -20,23 +20,26 @@ export type Workload = {
   observed_memory_per_pod_mib: number | null
   hpa: Hpa | null
   rollout: { max_surge_percent: number }
+  pool: string | null
+}
+
+export type NodePool = {
+  name: string
+  machine: {
+    cpu_m: number
+    memory_mib: number
+    reserved_cpu_m: number
+    reserved_memory_mib: number
+    max_pods: number
+  }
+  min_nodes: number
+  current_nodes: number
+  max_nodes: number
 }
 
 export type ClusterConfig = {
   workloads: Record<string, Workload>
-  node_pool: {
-    name: string
-    machine: {
-      cpu_m: number
-      memory_mib: number
-      reserved_cpu_m: number
-      reserved_memory_mib: number
-      max_pods: number
-    }
-    min_nodes: number
-    current_nodes: number
-    max_nodes: number
-  }
+  node_pools: Record<string, NodePool>
 }
 
 export type WorkloadResult = {
@@ -51,9 +54,8 @@ export type WorkloadResult = {
   rollout_replicas_at_max: number
 }
 
-export type ScenarioResult = {
-  name: string
-  replicas: Record<string, number>
+export type PoolScenarioResult = {
+  pool: string
   pod_count: number
   cpu_requested_m: number
   memory_requested_mib: number
@@ -72,6 +74,22 @@ export type ScenarioResult = {
   oversized_pod_count: number
   pods_per_node: number | null
   fragmentation_resource: string | null
+}
+
+export type ScenarioResult = {
+  name: string
+  replicas: Record<string, number>
+  pod_count: number
+  cpu_requested_m: number
+  memory_requested_mib: number
+  nodes_required: number
+  effective_nodes_required: number
+  current_nodes: number
+  nodes_to_add: number
+  nodes_to_remove: number
+  schedulable: boolean
+  oversized_pod_count: number
+  pools: Record<string, PoolScenarioResult>
 }
 
 export type ClusterResult = {
@@ -94,9 +112,6 @@ export type ScenarioDiff = {
   current_nodes: ValueChange
   nodes_to_add: ValueChange
   nodes_to_remove: ValueChange
-  node_headroom: ValueChange
-  limiting_resource_before: string
-  limiting_resource_after: string
   schedulable_before: boolean
   schedulable_after: boolean
 }
@@ -108,6 +123,8 @@ export type CompareResponse = {
     changes: Record<string, { before: unknown; after: unknown }>
     workloads_added: string[]
     workloads_removed: string[]
+    node_pools_added: string[]
+    node_pools_removed: string[]
   }
   impact_diff: {
     workloads: Record<string, Record<string, ValueChange>>
