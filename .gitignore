@@ -1,0 +1,109 @@
+# kcap — root .gitignore
+# Backend: Python 3.13 / FastAPI, managed with uv + mise
+# Frontend: React 19 + TypeScript + Vite (see frontend/.gitignore for Vite-local rules)
+#
+# Intentionally TRACKED: pyproject.toml, uv.lock, .python-version, .mise.toml,
+# Dockerfile, compose.yaml, .dockerignore, frontend/package-lock.json
+
+# ---------------------------------------------------------------------------
+# Environment & secrets
+# ---------------------------------------------------------------------------
+.env
+.env.*
+!.env.example
+!.env.sample
+*.pem
+*.key
+
+# ---------------------------------------------------------------------------
+# Python
+# ---------------------------------------------------------------------------
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# Build / packaging artifacts (dist/ also covers the Vite build output)
+build/
+dist/
+wheels/
+*.egg-info/
+.eggs/
+
+# Virtual environments (uv creates .venv/)
+.venv/
+venv/
+env/
+
+# ---------------------------------------------------------------------------
+# Python tooling caches & test/coverage output
+# ---------------------------------------------------------------------------
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.pytype/
+.tox/
+.nox/
+.hypothesis/
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/
+
+# ---------------------------------------------------------------------------
+# Node / TypeScript / React / Vite
+# (frontend/.gitignore scopes the rest; these keep the repo root clean too)
+# ---------------------------------------------------------------------------
+node_modules/
+dist-ssr/
+.vite/
+*.tsbuildinfo
+coverage/
+
+# Lint caches — this project uses oxlint (no cache file today); kept for safety
+.eslintcache
+
+# ---------------------------------------------------------------------------
+# Docker (local-only overrides; Dockerfile and compose.yaml stay tracked)
+# ---------------------------------------------------------------------------
+compose.override.yml
+compose.override.yaml
+docker-compose.override.yml
+docker-compose.override.yaml
+
+# ---------------------------------------------------------------------------
+# Local tooling & machine-specific config
+# ---------------------------------------------------------------------------
+.mise.local.toml
+.mise/
+.claude/settings.local.json
+*.local
+
+# ---------------------------------------------------------------------------
+# Logs & scratch space
+# (*.log also covers npm-debug.log*, yarn-error.log*, pnpm-debug.log*, etc.)
+# ---------------------------------------------------------------------------
+*.log
+logs/
+tmp/
+.tmp/
+scratch/
+
+# ---------------------------------------------------------------------------
+# Editors & IDEs
+# ---------------------------------------------------------------------------
+.idea/
+.vscode/*
+!.vscode/extensions.json
+!.vscode/settings.json
+!.vscode/launch.json
+*.sw?
+*~
+
+# ---------------------------------------------------------------------------
+# OS cruft
+# ---------------------------------------------------------------------------
+.DS_Store
+._*
+Thumbs.db
+Desktop.ini

@@ -1,0 +1,212 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+# Superseded PR runs are pointless; main runs must finish so a release is never
+# cancelled halfway through.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions: {}
+
+env:
+  REGISTRY_IMAGE: ghcr.io/${{ github.repository }}
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v5
+
+      # mise installs the uv/node versions pinned in .mise.toml plus the Python
+      # version in .python-version, and caches them.
+      - uses: jdx/mise-action@v2
+
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cache/uv
+            ~/.npm
+          key: deps-${{ runner.os }}-${{ hashFiles('uv.lock', 'frontend/package-lock.json') }}
+          restore-keys: deps-${{ runner.os }}-
+
+      - run: mise run setup
+      - run: mise run check
+
+  release:
+    if: github.event_name == 'push'
+    needs: check
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    outputs:
+      version: ${{ steps.release.outputs.version }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0 # semantic-release needs full history to find the previous tag
+
+      # Derives the next version from Conventional Commits, then creates the git tag
+      # and GitHub release. With no releasable commits it exits cleanly and leaves
+      # `version` empty, which the build job below treats as "nothing to ship".
+      - id: release
+        uses: go-semantic-release/action@v1
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          allow-initial-development-versions: true
+
+  # One leg per architecture on a native runner — no QEMU. Each leg pushes an
+  # untagged, single-platform image and reports only its digest; the `publish`
+  # job below stitches the digests into one tagged multi-arch manifest.
+  build:
+    needs: [check, release]
+    # `release` is skipped on pull requests, so the result of `needs` can't be relied
+    # on directly. On main, build only when a version was actually released.
+    if: >-
+      !cancelled() && needs.check.result == 'success'
+      && (github.event_name == 'pull_request' || needs.release.outputs.version != '')
+    runs-on: ${{ matrix.runner }}
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: linux/amd64
+            runner: ubuntu-latest
+            arch: amd64
+          - platform: linux/arm64
+            runner: ubuntu-24.04-arm # free for public repositories
+            arch: arm64
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # First matching entry becomes the primary tag: `pr-123` on pull requests,
+      # the released version on main. `latest` is added automatically alongside a
+      # non-prerelease semver tag. No tags are applied to the per-arch images —
+      # they exist only as digests — but `version` is reused as the build version.
+      - id: meta
+        uses: docker/metadata-action@v5
+        env:
+          DOCKER_METADATA_ANNOTATIONS_LEVELS: manifest
+        with:
+          images: ${{ env.REGISTRY_IMAGE }}
+          tags: |
+            type=ref,event=pr
+            type=sha,enable=${{ github.event_name == 'pull_request' }}
+            type=semver,pattern={{version}},value=${{ needs.release.outputs.version }}
+            type=semver,pattern={{major}}.{{minor}},value=${{ needs.release.outputs.version }}
+            type=semver,pattern={{major}},value=${{ needs.release.outputs.version }},enable=${{ !startsWith(needs.release.outputs.version, '0.') }}
+
+      - id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: ${{ matrix.platform }}
+          # Baked in as the version `/health` reports: the released semver on
+          # main, `pr-123` on pull requests. Without it the image stays 0.0.0.
+          build-args: |
+            KCAP_VERSION=${{ steps.meta.outputs.version }}
+          labels: ${{ steps.meta.outputs.labels }}
+          annotations: ${{ steps.meta.outputs.annotations }}
+          # Forks get a read-only GITHUB_TOKEN, so build them without pushing.
+          outputs: >-
+            ${{ github.event.pull_request.head.repo.fork
+            && 'type=image,push=false'
+            || format('type=image,name={0},push-by-digest=true,name-canonical=true,push=true', env.REGISTRY_IMAGE) }}
+          # Scoped per architecture so the two legs don't evict each other's cache.
+          cache-from: type=gha,scope=${{ matrix.arch }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.arch }}
+
+      - name: Export digest
+        if: ${{ !github.event.pull_request.head.repo.fork }}
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          mkdir -p "${{ runner.temp }}/digests"
+          touch "${{ runner.temp }}/digests/${DIGEST#sha256:}"
+
+      - uses: actions/upload-artifact@v4
+        if: ${{ !github.event.pull_request.head.repo.fork }}
+        with:
+          name: digests-${{ matrix.arch }}
+          path: ${{ runner.temp }}/digests/*
+          if-no-files-found: error
+          retention-days: 1
+
+  publish:
+    needs: [check, release, build]
+    # Same gate as `build`, plus: nothing to merge if a fork PR skipped the push.
+    if: >-
+      !cancelled() && needs.check.result == 'success' && needs.build.result == 'success'
+      && !github.event.pull_request.head.repo.fork
+      && (github.event_name == 'pull_request' || needs.release.outputs.version != '')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: ${{ runner.temp }}/digests
+          pattern: digests-*
+          merge-multiple: true
+
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - id: meta
+        uses: docker/metadata-action@v5
+        env:
+          # The manifest list is an OCI image index; without this the annotations
+          # land only on the per-arch manifests and GHCR shows nothing.
+          DOCKER_METADATA_ANNOTATIONS_LEVELS: index
+        with:
+          images: ${{ env.REGISTRY_IMAGE }}
+          tags: |
+            type=ref,event=pr
+            type=sha,enable=${{ github.event_name == 'pull_request' }}
+            type=semver,pattern={{version}},value=${{ needs.release.outputs.version }}
+            type=semver,pattern={{major}}.{{minor}},value=${{ needs.release.outputs.version }}
+            type=semver,pattern={{major}},value=${{ needs.release.outputs.version }},enable=${{ !startsWith(needs.release.outputs.version, '0.') }}
+
+      - name: Create multi-arch manifest
+        working-directory: ${{ runner.temp }}/digests
+        env:
+          TAGS: ${{ steps.meta.outputs.tags }}
+          ANNOTATIONS: ${{ steps.meta.outputs.annotations }}
+        run: |
+          args=()
+          while IFS= read -r tag; do
+            if [ -n "$tag" ]; then args+=(--tag "$tag"); fi
+          done <<< "$TAGS"
+          while IFS= read -r annotation; do
+            if [ -n "$annotation" ]; then args+=(--annotation "$annotation"); fi
+          done <<< "$ANNOTATIONS"
+          for digest in *; do
+            args+=("${REGISTRY_IMAGE}@sha256:${digest}")
+          done
+          docker buildx imagetools create "${args[@]}"
+
+      - name: Inspect
+        run: docker buildx imagetools inspect "${REGISTRY_IMAGE}:${{ steps.meta.outputs.version }}"

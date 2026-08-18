@@ -1,0 +1,63 @@
+# `.python-version` is the single source of truth for the Python version: uv reads
+# it natively (it is the only file-based Python pin uv honors), and this setting
+# makes mise read the same file instead of a second, drift-prone pin here.
+[settings]
+idiomatic_version_file_enable_tools = ["python"]
+
+[tools]
+uv = "0.11.7"
+node = "24"
+
+# Strict, lockfile-only installs. The loose forms (`uv sync`, `npm install`)
+# rewrite the lockfiles in place, so a manifest that had drifted out of sync with
+# its lock would be silently repaired in CI, pass `check`, and only surface on the
+# same commit as a failed `npm ci` in the image build — or, worse, an image whose
+# `uv sync --frozen` quietly installed the stale lock. Drift must fail here.
+# Add dependencies deliberately: `uv add <pkg>` / `npm install <pkg> --prefix frontend`.
+[tasks.setup]
+description = "Install backend and frontend dependencies from the lockfiles."
+run = """
+uv sync --locked
+npm --prefix frontend ci
+"""
+
+[tasks.test]
+description = "Run the backend test suite with verbose output."
+run = "uv run pytest -v"
+
+[tasks.check]
+description = "Run backend tests and frontend quality checks."
+run = """
+uv run pytest
+npm --prefix frontend run lint
+npm --prefix frontend run build
+"""
+
+[tasks.serve]
+description = "Run the API server."
+run = "uv run uvicorn kcap.api:app --host 0.0.0.0 --port 8000"
+
+[tasks.api-dev]
+description = "Run the API server with automatic reload."
+run = "uv run uvicorn kcap.api:app --host 0.0.0.0 --port 8000 --reload"
+
+[tasks.frontend-dev]
+description = "Run the Vite frontend development server."
+run = "npm --prefix frontend run dev"
+
+[tasks.dev]
+description = "Run the API and frontend development servers."
+run = """
+uv run uvicorn kcap.api:app --host 0.0.0.0 --port 8000 --reload &
+api_pid=$!
+trap 'kill $api_pid 2>/dev/null || true' EXIT INT TERM
+npm --prefix frontend run dev
+"""
+
+[tasks.container-build]
+description = "Build the combined production container."
+run = "docker build -t kcap:local ."
+
+[tasks.container-up]
+description = "Build and run the combined container with Compose."
+run = "docker compose up --build"

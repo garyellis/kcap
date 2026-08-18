@@ -1,0 +1,139 @@
+name: GHCR cleanup
+
+# Separate from ci.yml on purpose: nothing here builds, tests, or releases, and
+# its triggers (a closed pull request, a monthly schedule) would otherwise have
+# to be threaded through every job gate in that workflow.
+on:
+  pull_request:
+    types: [closed]
+  schedule:
+    - cron: "23 4 1 * *" # 04:23 UTC on the 1st of each month
+  workflow_dispatch:
+
+permissions: {}
+
+env:
+  # `garyellis` is a personal account, so the package endpoints are the
+  # `/users/{owner}/…` ones — the `/orgs/…` paths 404 here, and `/user/…`
+  # (the authenticated user) is not usable by a workflow token at all.
+  OWNER: ${{ github.repository_owner }}
+  PACKAGE: kcap
+  REGISTRY_IMAGE: ghcr.io/${{ github.repository }}
+
+jobs:
+  # Every PR build publishes `pr-N` plus a `sha-…` tag per pushed commit, and
+  # nothing else ever removes them.
+  pr-tags:
+    if: github.event_name == 'pull_request' && !github.event.pull_request.head.repo.fork
+    runs-on: ubuntu-latest
+    # Deletion needs `packages: write`; GITHUB_TOKEN carries admin on the package
+    # because this repository published it, so no PAT is involved.
+    permissions:
+      packages: write
+      pull-requests: read
+    steps:
+      - name: Delete this PR's image versions
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR: ${{ github.event.pull_request.number }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+
+          # A PR that never pushed (build failed, workflow skipped) leaves no
+          # package at all. Nothing to do is not an error.
+          if ! versions=$(gh api --paginate "/users/${OWNER}/packages/container/${PACKAGE}/versions" 2>/dev/null); then
+            echo "::notice::No ${PACKAGE} package versions readable — nothing to clean up"
+            exit 0
+          fi
+
+          # The `sha-…` tags are short prefixes of this PR's commits, so match by
+          # prefix rather than assuming metadata-action's shortening length.
+          shas=$(gh api --paginate "/repos/${REPO}/pulls/${PR}/commits" --jq '[.[].sha]' | jq -s 'add // []')
+
+          # Only versions whose tags are *all* accounted for by this PR: a digest
+          # that also carries a release tag is left alone.
+          ids=$(jq -r --arg pr "pr-${PR}" --argjson shas "$shas" '
+            .[] | . as $v
+            | (($v.metadata.container.tags) // []) as $tags
+            | select(($tags | length) > 0)
+            | select(all($tags[];
+                . == $pr
+                or (startswith("sha-") and (.[4:] as $p | $shas | any(startswith($p))))))
+            | $v.id' <<<"$versions")
+
+          if [ -z "$ids" ]; then
+            echo "::notice::No image versions tagged for PR #${PR}"
+            exit 0
+          fi
+
+          for id in $ids; do
+            if gh api --silent --method DELETE "/users/${OWNER}/packages/container/${PACKAGE}/versions/${id}"; then
+              echo "deleted version ${id}"
+            else
+              echo "::warning::could not delete version ${id}"
+            fi
+          done
+
+          # The per-arch child manifests these indexes referenced are untagged and
+          # now unreferenced; the scheduled job below reclaims them.
+
+  # Multi-arch publishing leaves one untagged child manifest per architecture
+  # behind every tag, so "delete all untagged versions" would destroy released
+  # images. Only untagged versions that no live tag points at are removed.
+  untagged:
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    permissions:
+      packages: write
+    steps:
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Delete unreferenced untagged versions
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+
+          if ! versions=$(gh api --paginate "/users/${OWNER}/packages/container/${PACKAGE}/versions" 2>/dev/null); then
+            echo "::notice::No ${PACKAGE} package versions readable — nothing to prune"
+            exit 0
+          fi
+
+          # Every digest referenced by a tagged manifest, read from the registry
+          # itself. Inspection failures abort the run rather than widening the
+          # delete set, so an incomplete list can never orphan a live image.
+          referenced=$(
+            jq -r '.[] | select(((.metadata.container.tags) // []) | length > 0) | .name' <<<"$versions" \
+            | while read -r digest; do
+                docker buildx imagetools inspect --raw "${REGISTRY_IMAGE}@${digest}" | jq -r '.manifests[]?.digest'
+              done \
+            | jq -R . | jq -s .
+          )
+
+          # Untagged, unreferenced, and older than a week — the age bound keeps an
+          # in-flight release (per-arch digests pushed but not yet stitched into a
+          # tagged manifest) out of the delete set.
+          ids=$(jq -r --argjson refs "$referenced" '
+            .[] | . as $v
+            | select((($v.metadata.container.tags) // []) | length == 0)
+            | select(($refs | index($v.name)) | not)
+            | select((now - ($v.created_at | fromdateiso8601)) > 604800)
+            | $v.id' <<<"$versions")
+
+          if [ -z "$ids" ]; then
+            echo "::notice::Nothing to prune"
+            exit 0
+          fi
+
+          for id in $ids; do
+            if gh api --silent --method DELETE "/users/${OWNER}/packages/container/${PACKAGE}/versions/${id}"; then
+              echo "deleted untagged version ${id}"
+            else
+              echo "::warning::could not delete untagged version ${id}"
+            fi
+          done

@@ -1,0 +1,30 @@
+[project]
+name = "kcap"
+# Placeholder. kcap is deployed as a container, not published to an index, so the
+# real version lives in the git tag and image tag that go-semantic-release creates.
+# Nothing writes back here; the running app reports its version from KCAP_VERSION,
+# which the image build injects. See `kcap.__init__._resolve_version`.
+version = "0.0.0"
+description = "Capacity planner that packs pod requests onto nodes to model HPA behavior, node counts, and the fragmentation aggregate arithmetic hides."
+readme = "README.md"
+authors = [
+    { name = "Gary Ellis", email = "gary.luis.ellis@gmail.com" }
+]
+requires-python = ">=3.13"
+dependencies = [
+    "fastapi>=0.141.1",
+    "uvicorn>=0.52.3",
+]
+
+[project.scripts]
+kcap = "kcap:main"
+
+[build-system]
+requires = ["uv_build>=0.11.7,<0.12.0"]
+build-backend = "uv_build"
+
+[dependency-groups]
+dev = [
+    "httpx2>=2.10.0",
+    "pytest>=9.1.1",
+]
