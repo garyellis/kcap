@@ -114,7 +114,7 @@ jobs:
             type=semver,pattern={{major}},value=${{ needs.release.outputs.version }},enable=${{ !startsWith(needs.release.outputs.version, '0.') }}
 
       - id: build
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@v7
         with:
           context: .
           platforms: ${{ matrix.platform }}
