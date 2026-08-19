@@ -33,9 +33,32 @@ export type ExportedWorkload = {
   maxSurge?: string | number | null
   containers?: ExportedContainer[] | null
   initContainers?: ExportedContainer[] | null
+  // .spec.selector.matchLabels — how the controller finds its pods, and how
+  // the importer attributes pod metrics back to the workload.
+  selector?: Record<string, string> | null
   nodeSelector?: Record<string, string> | null
   tolerations?: unknown
   nodeAffinity?: unknown
+}
+
+export type ExportedPod = {
+  namespace: string
+  name: string
+  labels?: Record<string, string> | null
+  phase?: string | null
+}
+
+export type ExportedPodUsage = {
+  namespace: string
+  name: string
+  containers?: Array<{ usage?: ResourceMap | null }> | null
+}
+
+// PodMetrics carries no labels, so the export pairs it with a pod listing
+// ({name, namespace, labels, phase}) that the importer joins on.
+export type ExportedUsage = {
+  pods?: ExportedPod[] | null
+  metrics?: ExportedPodUsage[] | null
 }
 
 export type ExportedHpa = {
@@ -61,6 +84,8 @@ export type ClusterExport = {
   version: typeof CLUSTER_EXPORT_VERSION
   workloads: Array<ExportedWorkload | ExportedHpa>
   nodes: ExportedNode[] | null
+  // Added after version 1 shipped; optional so older exports still import.
+  usage?: ExportedUsage | null
 }
 
 export type ParsedImport =
@@ -150,20 +175,23 @@ export function parseImport(text: string): ParsedImport {
 // Kubernetes quantity parsing
 // ---------------------------------------------------------------------------
 
-// "500m" | "2" | "0.5" | 2 -> millicores. Rounded up so a nonzero request can
-// never collapse to zero.
+// Millicores per unit of each CPU suffix. metrics-server reports usage in
+// nanocores ("123456789n") or microcores; specs use "m" or bare cores.
+const CPU_SUFFIXES: Record<string, number> = { n: 1e-6, u: 1e-3, m: 1 }
+
+// "500m" | "123456789n" | "2" | "0.5" | 2 -> millicores. Rounded up so a
+// nonzero request can never collapse to zero.
 export function parseCpuQuantity(value: Quantity): number {
   if (value === null || value === undefined || value === '') return 0
   let amount: number
-  let milli = false
   if (typeof value === 'number') {
     amount = value * 1000
   } else {
-    const text = value.trim()
-    milli = text.endsWith('m')
-    const parsed = Number(milli ? text.slice(0, -1) : text)
+    const match = value.trim().match(/^([0-9.eE+-]+)(n|u|m)?$/)
+    if (!match) return 0
+    const parsed = Number(match[1])
     if (!Number.isFinite(parsed)) return 0
-    amount = milli ? parsed : parsed * 1000
+    amount = parsed * (match[2] ? CPU_SUFFIXES[match[2]] : 1000)
   }
   if (amount <= 0) return 0
   return Math.ceil(amount)
@@ -253,6 +281,38 @@ export function maxSurgePercent(kind: string, maxSurge: string | number | null |
   const absolute = Number(maxSurge)
   if (!Number.isFinite(absolute)) return 25
   return Math.round((100 * absolute) / Math.max(1, replicas))
+}
+
+// Sum container usage per pod, then average across the running pods the
+// workload's selector matches in its namespace. PodMetrics has no labels, so
+// the pod listing carries the attribution. null when the export has no usage
+// data (older script, metrics-server absent) or nothing matched.
+export function observedUsage(
+  item: ExportedWorkload,
+  usage: ExportedUsage | null | undefined,
+): { cpu_m: number; memory_mib: number } | null {
+  const selector = item.selector
+  if (!usage?.pods || !usage.metrics || !selector || Object.keys(selector).length === 0) return null
+  const metricsByPod = new Map<string, ExportedPodUsage>()
+  for (const metric of usage.metrics) metricsByPod.set(`${metric.namespace}/${metric.name}`, metric)
+  let pods = 0
+  let cpu = 0
+  let memory = 0
+  for (const pod of usage.pods) {
+    if (pod.namespace !== item.namespace) continue
+    if (pod.phase && pod.phase !== 'Running') continue
+    const labels = pod.labels ?? {}
+    if (!Object.entries(selector).every(([key, value]) => labels[key] === value)) continue
+    const metric = metricsByPod.get(`${pod.namespace}/${pod.name}`)
+    if (!metric) continue
+    pods += 1
+    for (const container of metric.containers ?? []) {
+      cpu += parseCpuQuantity(container.usage?.cpu)
+      memory += parseMemoryQuantity(container.usage?.memory)
+    }
+  }
+  if (pods === 0) return null
+  return { cpu_m: Math.round(cpu / pods), memory_mib: Math.round(memory / pods) }
 }
 
 export type SelectorGroup = {
@@ -354,6 +414,7 @@ export function transformClusterExport(
     const replicas = item.replicas ?? 1
     const hpa = hpaByTarget.get(`${item.namespace}/${item.kind.toLowerCase()}/${item.name}`)
     if (hpa) matchedHpas.add(hpa)
+    const observed = observedUsage(item, data.usage)
     workloads[key] = {
       name: key,
       resources: {
@@ -363,8 +424,8 @@ export function transformClusterExport(
         memory_limit_mib: summedLimit(containers, 'memory'),
       },
       current_replicas: replicas,
-      observed_cpu_per_pod_m: null,
-      observed_memory_per_pod_mib: null,
+      observed_cpu_per_pod_m: observed?.cpu_m ?? null,
+      observed_memory_per_pod_mib: observed?.memory_mib ?? null,
       hpa: hpa ? toHpa(hpa) : null,
       rollout: { max_surge_percent: maxSurgePercent(item.kind, item.maxSurge, replicas) },
       pool: null,
@@ -384,10 +445,18 @@ export function transformClusterExport(
       )
     }
   }
-  if (Object.values(workloads).some((workload) => workload.hpa !== null)) {
+  const blankHpaWorkloads = Object.values(workloads).filter(
+    (workload) => workload.hpa !== null && workload.observed_cpu_per_pod_m === null && workload.observed_memory_per_pod_mib === null,
+  )
+  if (blankHpaWorkloads.length > 0) {
     notes.push(
-      'Observed per-pod usage is not part of a cluster export, so HPA scenarios hold current replicas until you fill it in.',
+      data.usage
+        ? 'Some HPA workloads matched no pod metrics, so their scenarios hold current replicas until you fill in observed usage.'
+        : 'This export carries no pod metrics (metrics-server unavailable, or an older export script), so HPA scenarios hold current replicas until you fill in observed usage.',
     )
+  }
+  if (Object.values(workloads).some((workload) => workload.observed_cpu_per_pod_m !== null || workload.observed_memory_per_pod_mib !== null)) {
+    notes.push('Observed per-pod usage is a point-in-time average from pod metrics captured at export time.')
   }
   return { workloads, groups: [...groups.values()], carried, bestEffort, warnings, notes }
 }
@@ -638,6 +707,7 @@ const WORKLOAD_PROJECTION = `[
           maxSurge: .spec.strategy.rollingUpdate.maxSurge,
           containers: [(.spec.template.spec.containers // [])[] | { resources }],
           initContainers: [(.spec.template.spec.initContainers // [])[] | { resources, restartPolicy }],
+          selector: .spec.selector.matchLabels,
           nodeSelector: .spec.template.spec.nodeSelector,
           tolerations: .spec.template.spec.tolerations,
           nodeAffinity: .spec.template.spec.affinity.nodeAffinity.requiredDuringSchedulingIgnoredDuringExecution
@@ -655,6 +725,27 @@ const NODE_PROJECTION = `[
       }
   ]`
 
+// PodMetrics carries no labels, so a parallel pod listing provides them for
+// workload attribution. Both stay whitelist projections.
+const POD_PROJECTION = `[
+    .items[]
+    | {
+        namespace: .metadata.namespace,
+        name: .metadata.name,
+        labels: .metadata.labels,
+        phase: .status.phase
+      }
+  ]`
+
+const POD_METRICS_PROJECTION = `[
+    .items[]
+    | {
+        namespace: .metadata.namespace,
+        name: .metadata.name,
+        containers: [(.containers // [])[] | { usage: { cpu: .usage.cpu, memory: .usage.memory } }]
+      }
+  ]`
+
 function shellQuote(value: string): string {
   return `'${value.replace(/'/g, `'\\''`)}'`
 }
@@ -668,6 +759,7 @@ export function buildExportScript(namespace: string, selector: string): string {
 #   - HPA specs (targets, min/max replicas)
 #   - scheduling constraints (nodeSelector, tolerations, required node affinity)
 #   - node capacity, allocatable, labels, and taints (when permitted)
+#   - pod names, labels, and CPU/memory usage from metrics-server (when available)
 # It does NOT read env vars, images, annotations, or secrets.
 #
 # Writes kcap-export.json for the kcap import dialog.
@@ -695,10 +787,27 @@ else
   nodes=null
 fi
 
-jq -n --argjson workloads "$workloads" --argjson nodes "$nodes" \\
-  '{ kind: "kcap-cluster-export", version: 1, workloads: $workloads, nodes: $nodes }' \\
+# Pods and their metrics attribute observed usage to workloads. The selector
+# does not apply here: workloads are matched to pods by matchLabels on import.
+podscope=(--all-namespaces)
+if [ -n "$NAMESPACE" ]; then
+  podscope=(--namespace "$NAMESPACE")
+fi
+
+usage=null
+if kubectl auth can-i list pods "\${podscope[@]}" >/dev/null 2>&1 \\
+  && kubectl auth can-i list pods.metrics.k8s.io "\${podscope[@]}" >/dev/null 2>&1 \\
+  && metrics=$(kubectl get pods.metrics.k8s.io "\${podscope[@]}" -o json 2>/dev/null | jq '${POD_METRICS_PROJECTION}'); then
+  pods=$(kubectl get pods "\${podscope[@]}" -o json | jq '${POD_PROJECTION}')
+  usage=$(jq -n --argjson pods "$pods" --argjson metrics "$metrics" '{ pods: $pods, metrics: $metrics }')
+else
+  echo "no pod metrics (metrics-server missing or not permitted) — observed usage will be blank" >&2
+fi
+
+jq -n --argjson workloads "$workloads" --argjson nodes "$nodes" --argjson usage "$usage" \\
+  '{ kind: "kcap-cluster-export", version: 1, workloads: $workloads, nodes: $nodes, usage: $usage }' \\
   > kcap-export.json
 
-echo "wrote kcap-export.json: $(jq -r '.workloads | length' kcap-export.json) workload items, $(jq -r 'if .nodes == null then "no" else (.nodes | length) end' kcap-export.json) nodes" >&2
+echo "wrote kcap-export.json: $(jq -r '.workloads | length' kcap-export.json) workload items, $(jq -r 'if .nodes == null then "no" else (.nodes | length) end' kcap-export.json) nodes, $(jq -r 'if .usage == null then "no" else (.usage.metrics | length) end' kcap-export.json) pod metrics" >&2
 `
 }

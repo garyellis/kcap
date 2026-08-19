@@ -14,7 +14,7 @@ import {
   serializeScenario,
   transformClusterExport,
 } from './importers'
-import type { ClusterExport, ExportedNode, ExportedWorkload } from './importers'
+import type { ClusterExport, ExportedNode, ExportedUsage, ExportedWorkload } from './importers'
 
 function config(overrides: Partial<ClusterConfig> = {}): ClusterConfig {
   return {
@@ -59,8 +59,12 @@ function deployment(overrides: Partial<ExportedWorkload> = {}): ExportedWorkload
   }
 }
 
-function clusterExport(workloads: ClusterExport['workloads'], nodes: ExportedNode[] | null = null): ClusterExport {
-  return { kind: 'kcap-cluster-export', version: 1, workloads, nodes }
+function clusterExport(
+  workloads: ClusterExport['workloads'],
+  nodes: ExportedNode[] | null = null,
+  usage: ExportedUsage | null = null,
+): ClusterExport {
+  return { kind: 'kcap-cluster-export', version: 1, workloads, nodes, usage }
 }
 
 describe('parseCpuQuantity', () => {
@@ -74,6 +78,13 @@ describe('parseCpuQuantity', () => {
   it('rounds up so a nonzero request never becomes zero', () => {
     expect(parseCpuQuantity('0.0001')).toBe(1)
     expect(parseCpuQuantity('1.5m')).toBe(2)
+  })
+
+  it('parses metrics-server nanocore and microcore quantities', () => {
+    expect(parseCpuQuantity('123456789n')).toBe(124)
+    expect(parseCpuQuantity('250000000n')).toBe(250)
+    expect(parseCpuQuantity('1500u')).toBe(2)
+    expect(parseCpuQuantity('250m')).toBe(250)
   })
 
   it('treats missing, zero, and garbage as zero', () => {
@@ -249,6 +260,97 @@ describe('transformClusterExport', () => {
     const result = transformClusterExport(clusterExport([deployment(), orphan]))
     expect(result.warnings).toHaveLength(1)
     expect(result.warnings[0]).toContain('demo/ghost')
+  })
+
+  it('averages summed per-pod container usage onto the matching workload', () => {
+    const usage: ExportedUsage = {
+      pods: [
+        { namespace: 'demo', name: 'web-1', labels: { app: 'web', 'pod-template-hash': 'abc' }, phase: 'Running' },
+        { namespace: 'demo', name: 'web-2', labels: { app: 'web', 'pod-template-hash': 'abc' }, phase: 'Running' },
+      ],
+      metrics: [
+        {
+          namespace: 'demo',
+          name: 'web-1',
+          containers: [{ usage: { cpu: '100m', memory: '131072Ki' } }, { usage: { cpu: '50000000n', memory: '64Mi' } }],
+        },
+        { namespace: 'demo', name: 'web-2', containers: [{ usage: { cpu: '250000000n', memory: '1Gi' } }] },
+      ],
+    }
+    const data = clusterExport([deployment({ selector: { app: 'web' } })], null, usage)
+    const workload = transformClusterExport(data).workloads['demo/web']
+    // web-1 sums to 150m / 192Mi, web-2 to 250m / 1024Mi -> averages below.
+    expect(workload.observed_cpu_per_pod_m).toBe(200)
+    expect(workload.observed_memory_per_pod_mib).toBe(608)
+    expect(transformClusterExport(data).notes.join(' ')).not.toContain('hold current replicas')
+  })
+
+  it('attributes pods by selector and namespace, skipping non-running pods', () => {
+    const usage: ExportedUsage = {
+      pods: [
+        { namespace: 'demo', name: 'web-1', labels: { app: 'web' }, phase: 'Running' },
+        { namespace: 'demo', name: 'web-2', labels: { app: 'web' }, phase: 'Pending' },
+        { namespace: 'demo', name: 'other-1', labels: { app: 'other' }, phase: 'Running' },
+        { namespace: 'prod', name: 'web-1', labels: { app: 'web' }, phase: 'Running' },
+      ],
+      metrics: [
+        { namespace: 'demo', name: 'web-1', containers: [{ usage: { cpu: '100m', memory: '128Mi' } }] },
+        { namespace: 'demo', name: 'web-2', containers: [{ usage: { cpu: '900m', memory: '900Mi' } }] },
+        { namespace: 'demo', name: 'other-1', containers: [{ usage: { cpu: '300m', memory: '256Mi' } }] },
+        { namespace: 'prod', name: 'web-1', containers: [{ usage: { cpu: '900m', memory: '900Mi' } }] },
+      ],
+    }
+    const items = [
+      deployment({ selector: { app: 'web' } }),
+      deployment({ name: 'other', selector: { app: 'other' } }),
+    ]
+    const result = transformClusterExport(clusterExport(items, null, usage))
+    expect(result.workloads['demo/web'].observed_cpu_per_pod_m).toBe(100)
+    expect(result.workloads['demo/web'].observed_memory_per_pod_mib).toBe(128)
+    expect(result.workloads['demo/other'].observed_cpu_per_pod_m).toBe(300)
+    expect(result.workloads['demo/other'].observed_memory_per_pod_mib).toBe(256)
+  })
+
+  it('keeps observed usage null when no pod matches or the selector is absent', () => {
+    const usage: ExportedUsage = {
+      pods: [{ namespace: 'demo', name: 'other-1', labels: { app: 'other' }, phase: 'Running' }],
+      metrics: [{ namespace: 'demo', name: 'other-1', containers: [{ usage: { cpu: '300m', memory: '256Mi' } }] }],
+    }
+    const items = [deployment({ selector: { app: 'web' } }), deployment({ name: 'bare', selector: null })]
+    const result = transformClusterExport(clusterExport(items, null, usage))
+    for (const name of ['demo/web', 'demo/bare']) {
+      expect(result.workloads[name].observed_cpu_per_pod_m).toBeNull()
+      expect(result.workloads[name].observed_memory_per_pod_mib).toBeNull()
+    }
+  })
+
+  it('notes missing metrics without claiming usage cannot be exported', () => {
+    const hpa = {
+      kind: 'HorizontalPodAutoscaler' as const,
+      namespace: 'demo',
+      name: 'web-hpa',
+      target: { kind: 'Deployment', name: 'web' },
+      min: 2,
+      max: 12,
+      metrics: [{ resource: 'cpu', target: 70 }],
+      targetCPUUtilizationPercentage: null,
+    }
+    const result = transformClusterExport(clusterExport([deployment({ selector: { app: 'web' } }), hpa]))
+    expect(result.workloads['demo/web'].observed_cpu_per_pod_m).toBeNull()
+    expect(result.workloads['demo/web'].observed_memory_per_pod_mib).toBeNull()
+    const notes = result.notes.join(' ')
+    expect(notes).toContain('hold current replicas')
+    expect(notes).not.toContain('not part of a cluster export')
+  })
+
+  it('imports an old export without the usage field cleanly, with nulls', () => {
+    const old = { kind: 'kcap-cluster-export', version: 1, workloads: [deployment()], nodes: null }
+    const parsed = parseImport(JSON.stringify(old))
+    expect(parsed.kind).toBe('cluster')
+    if (parsed.kind !== 'cluster') return
+    const workload = transformClusterExport(parsed.data).workloads['demo/web']
+    expect(workload.observed_cpu_per_pod_m).toBeNull()
+    expect(workload.observed_memory_per_pod_mib).toBeNull()
   })
 
   it('groups workloads by identical nodeSelector with a stable key', () => {
@@ -431,6 +533,14 @@ describe('buildExportScript', () => {
     expect(script).toContain('set -euo pipefail')
     expect(script).toContain('kubectl auth can-i list nodes')
     expect(script).toContain('kcap-export.json')
+  })
+
+  it('collects pod metrics behind a graceful guard', () => {
+    const script = buildExportScript('', '')
+    expect(script).toContain('pods.metrics.k8s.io')
+    expect(script).toContain('kubectl auth can-i list pods')
+    expect(script).toContain('selector: .spec.selector.matchLabels')
+    expect(script).toContain('observed usage will be blank')
   })
 
   it('defaults to all namespaces and quotes shell metacharacters', () => {

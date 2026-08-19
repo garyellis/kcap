@@ -4,6 +4,7 @@ import { evaluateCluster } from '../api'
 import type { ClusterConfig } from '../api'
 import { buildExportScript, parseImport, planClusterImport, UNPINNED_GROUP } from '../importers'
 import type { ClusterImportPlan, ParsedImport, SelectorGroup } from '../importers'
+import { copyTextToClipboard } from './clipboard'
 import { downloadFile } from './download'
 import { Toggle } from './Fields'
 import { Modal } from './Modal'
@@ -156,7 +157,7 @@ export function ImportModal({
 }) {
   const [namespace, setNamespace] = useState('')
   const [selector, setSelector] = useState('')
-  const [scriptCopied, setScriptCopied] = useState(false)
+  const [scriptCopied, setScriptCopied] = useState<'ok' | 'fail' | null>(null)
 
   const [text, setText] = useState('')
   const [parsed, setParsed] = useState<ParsedImport | null>(null)
@@ -183,9 +184,9 @@ export function ImportModal({
   )
 
   const copyScript = () => {
-    navigator.clipboard.writeText(script).then(() => {
-      setScriptCopied(true)
-      window.setTimeout(() => setScriptCopied(false), 1500)
+    void copyTextToClipboard(script).then((ok) => {
+      setScriptCopied(ok ? 'ok' : 'fail')
+      window.setTimeout(() => setScriptCopied(null), 1500)
     })
   }
 
@@ -217,9 +218,10 @@ export function ImportModal({
   return (
     <Modal title="Import" onClose={onClose}>
       <section className="import-step">
-        <div className="import-step-head"><span className="chip">Step 1</span><h3>Generate a cluster export script</h3></div>
+        <div className="import-step-head"><span className="chip">Step 1</span><h3>Generate a capacity export script</h3></div>
         <p className="modal-lead">
-          Run this against your cluster to capture workload shapes, HPAs, scheduling constraints, and node capacity.
+          Run this against your cluster to capture workload shapes, HPAs, scheduling constraints, node capacity, and
+          observed pod usage when metrics-server is available.
           It reads no env vars, images, annotations, or secrets, and writes <code>kcap-export.json</code>.
         </p>
         <div className="import-inputs">
@@ -237,7 +239,7 @@ export function ImportModal({
           </label>
         </div>
         <div className="modal-actions">
-          <button type="button" className="button-primary" onClick={copyScript}>{scriptCopied ? 'Copied' : 'Copy script'}</button>
+          <button type="button" className="button-primary" onClick={copyScript}>{scriptCopied === 'ok' ? 'Copied' : scriptCopied === 'fail' ? 'Copy failed' : 'Copy script'}</button>
           <button type="button" className="button-secondary" onClick={() => downloadFile('kcap-export.sh', script, 'text/x-shellscript')}>
             Download .sh
           </button>
