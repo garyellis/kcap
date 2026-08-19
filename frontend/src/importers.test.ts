@@ -1,4 +1,9 @@
-import { describe, expect, it } from 'vitest'
+import { spawnSync } from 'node:child_process'
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import { env } from 'node:process'
+import { beforeAll, describe, expect, it } from 'vitest'
 import type { ClusterConfig } from './api'
 import {
   applyClusterImport,
@@ -548,5 +553,148 @@ describe('buildExportScript', () => {
     expect(script).toContain("NAMESPACE=''")
     expect(script).toContain('--all-namespaces')
     expect(script).toContain("SELECTOR='it'\\''s'")
+  })
+
+  it('bakes the zero-replica policy with a flippable default', () => {
+    const on = buildExportScript('', '')
+    const off = buildExportScript('', '', false)
+    expect(on).toContain('SKIP_ZERO_REPLICAS=1')
+    expect(off).toContain('SKIP_ZERO_REPLICAS=0')
+    // The gated filter stage and the null-semantics comment ship either way,
+    // so a downloaded script flips behavior by editing one variable.
+    for (const script of [on, off]) {
+      expect(script).toContain('if [ "$SKIP_ZERO_REPLICAS" = "1" ]; then')
+      expect(script).toContain('null-replica workloads survive this filter')
+      expect(script).toContain('ascii_downcase')
+      expect(script).toContain('SKIP_ZERO_REPLICAS=0 keeps them')
+    }
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Export script execution against a stub kubectl. The shim serves raw
+// Kubernetes-shaped JSON (the projections run on it) and denies auth can-i so
+// the node and pod-metrics branches stay quiet. Requires bash and jq, exactly
+// as the script itself does.
+// ---------------------------------------------------------------------------
+
+const KUBECTL_SHIM = `#!/usr/bin/env bash
+case "$1" in
+  config) echo "stub-context" ;;
+  auth) exit 1 ;;
+  get) cat "$KCAP_FIXTURE" ;;
+  *) exit 1 ;;
+esac
+`
+
+type ScriptRun = { doc: ClusterExport; stderr: string }
+
+function runExportScript(script: string, items: unknown[]): ScriptRun {
+  const dir = mkdtempSync(join(tmpdir(), 'kcap-script-'))
+  try {
+    const bin = join(dir, 'bin')
+    mkdirSync(bin)
+    writeFileSync(join(bin, 'kubectl'), KUBECTL_SHIM)
+    chmodSync(join(bin, 'kubectl'), 0o755)
+    const fixture = join(dir, 'fixture.json')
+    writeFileSync(fixture, JSON.stringify({ items }))
+    writeFileSync(join(dir, 'export.sh'), script)
+    const result = spawnSync('bash', ['export.sh'], {
+      cwd: dir,
+      encoding: 'utf8',
+      env: { ...env, PATH: `${bin}:${env.PATH ?? ''}`, KCAP_FIXTURE: fixture },
+    })
+    if (result.status !== 0) throw new Error(`export script failed (${String(result.status)}): ${result.stderr}`)
+    return { doc: JSON.parse(readFileSync(join(dir, 'kcap-export.json'), 'utf8')) as ClusterExport, stderr: result.stderr }
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+}
+
+function rawWorkload(kind: 'Deployment' | 'StatefulSet', name: string, replicas: number | null): unknown {
+  return {
+    kind,
+    metadata: { namespace: 'default', name },
+    spec: {
+      ...(replicas === null ? {} : { replicas }),
+      selector: { matchLabels: { app: name } },
+      template: { spec: { containers: [{ name, resources: { requests: { cpu: '100m', memory: '128Mi' } } }] } },
+    },
+  }
+}
+
+function rawHpa(name: string, targetKind: string, targetName: string): unknown {
+  return {
+    kind: 'HorizontalPodAutoscaler',
+    metadata: { namespace: 'default', name },
+    spec: { scaleTargetRef: { kind: targetKind, name: targetName }, minReplicas: 1, maxReplicas: 5 },
+  }
+}
+
+// Flagger shape plus the edge cases: the original parked at 0 with its stale
+// HPA, the generated -primary at 3 whose HPA names a case-differing target
+// kind ("deployment" — only the lowercased join can keep it), a null-replicas
+// deployment (Kubernetes defaults it to 1 — must survive), and a zero-replica
+// StatefulSet with its HPA.
+const FLAGGER_FIXTURE = [
+  rawWorkload('Deployment', 'myapp', 0),
+  rawHpa('myapp', 'Deployment', 'myapp'),
+  rawWorkload('Deployment', 'myapp-primary', 3),
+  rawHpa('myapp-primary', 'deployment', 'myapp-primary'),
+  rawWorkload('Deployment', 'webapp', null),
+  rawWorkload('StatefulSet', 'cache', 0),
+  rawHpa('cache', 'StatefulSet', 'cache'),
+]
+
+describe('export script execution (stub kubectl)', () => {
+  let filtered: ScriptRun
+
+  beforeAll(() => {
+    filtered = runExportScript(buildExportScript('', ''), FLAGGER_FIXTURE)
+  })
+
+  const keptKeys = (run: ScriptRun) => run.doc.workloads.map((item) => `${item.kind}/${item.name}`).sort()
+
+  it('keeps only the Flagger primary pair and reports the skip on stderr', () => {
+    expect(filtered.doc.kind).toBe('kcap-cluster-export')
+    const kept = keptKeys(filtered)
+    expect(kept).toContain('Deployment/myapp-primary')
+    expect(kept).toContain('HorizontalPodAutoscaler/myapp-primary')
+    expect(kept).not.toContain('Deployment/myapp')
+    expect(kept).not.toContain('HorizontalPodAutoscaler/myapp')
+    expect(filtered.stderr).toContain('skipped 4 zero-replica workload items')
+  })
+
+  it('keeps a null-replicas workload — Kubernetes defaults it to 1', () => {
+    expect(keptKeys(filtered)).toContain('Deployment/webapp')
+  })
+
+  it('drops a zero StatefulSet and its HPA, joining HPAs on lowercased kind', () => {
+    const kept = keptKeys(filtered)
+    expect(kept).not.toContain('StatefulSet/cache')
+    expect(kept).not.toContain('HorizontalPodAutoscaler/cache')
+    // The surviving primary HPA declared its target kind as "deployment":
+    // only the ascii_downcase join can have matched it to the Deployment.
+    expect(kept).toContain('HorizontalPodAutoscaler/myapp-primary')
+  })
+
+  it('captures everything when SKIP_ZERO_REPLICAS is flipped to 0 in the script text', () => {
+    // Anchor to the assignment line — the header comment also mentions the
+    // variable, and this rewrite mimics an operator editing that one line.
+    const script = buildExportScript('', '').replace('\nSKIP_ZERO_REPLICAS=1\n', '\nSKIP_ZERO_REPLICAS=0\n')
+    const run = runExportScript(script, FLAGGER_FIXTURE)
+    expect(run.doc.workloads).toHaveLength(FLAGGER_FIXTURE.length)
+    expect(run.stderr).not.toContain('skipped')
+  })
+
+  it('round-trips the filtered export through the importer with zero warnings', () => {
+    const parsed = parseImport(JSON.stringify(filtered.doc))
+    expect(parsed.kind).toBe('cluster')
+    if (parsed.kind !== 'cluster') return
+    const result = transformClusterExport(parsed.data)
+    expect(result.warnings).toEqual([])
+    expect(Object.keys(result.workloads).sort()).toEqual(['default/myapp-primary', 'default/webapp'])
+    expect(result.workloads['default/myapp-primary'].hpa).not.toBeNull()
+    expect(result.workloads['default/webapp'].current_replicas).toBe(1)
   })
 })

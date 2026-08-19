@@ -157,6 +157,7 @@ export function ImportModal({
 }) {
   const [namespace, setNamespace] = useState('')
   const [selector, setSelector] = useState('')
+  const [skipZeroReplicas, setSkipZeroReplicas] = useState(true)
   const [scriptCopied, setScriptCopied] = useState<'ok' | 'fail' | null>(null)
 
   const [text, setText] = useState('')
@@ -168,7 +169,10 @@ export function ImportModal({
   const [commitError, setCommitError] = useState<string | null>(null)
   const [applying, setApplying] = useState(false)
 
-  const script = useMemo(() => buildExportScript(namespace, selector), [namespace, selector])
+  const script = useMemo(
+    () => buildExportScript(namespace, selector, skipZeroReplicas),
+    [namespace, selector, skipZeroReplicas],
+  )
 
   useEffect(() => {
     const timer = window.setTimeout(() => {
@@ -223,6 +227,8 @@ export function ImportModal({
           Run this against your cluster to capture workload shapes, HPAs, scheduling constraints, node capacity, and
           observed pod usage when metrics-server is available.
           It reads no env vars, images, annotations, or secrets, and writes <code>kcap-export.json</code>.
+          Zero-replica workloads (e.g. originals parked at 0 by Flagger) and their HPAs are skipped unless
+          the toggle below is off.
         </p>
         <div className="import-inputs">
           <label className="field">
@@ -237,6 +243,12 @@ export function ImportModal({
               <input type="text" value={selector} placeholder="e.g. team=payments" onChange={(event) => setSelector(event.target.value)} />
             </span>
           </label>
+          <Toggle
+            label="Skip zero-replica workloads"
+            detail={skipZeroReplicas ? 'drops workloads at 0 and their HPAs' : 'capture everything'}
+            checked={skipZeroReplicas}
+            onChange={setSkipZeroReplicas}
+          />
         </div>
         <div className="modal-actions">
           <button type="button" className="button-primary" onClick={copyScript}>{scriptCopied === 'ok' ? 'Copied' : scriptCopied === 'fail' ? 'Copy failed' : 'Copy script'}</button>

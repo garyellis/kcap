@@ -715,6 +715,25 @@ const WORKLOAD_PROJECTION = `[
       end
   ]`
 
+// Two-pass join over the projected workload array: pass 1 collects kept
+// workload identities, pass 2 keeps workloads in that set plus HPAs whose
+// scaleTargetRef resolves into it — the same namespace/kind-lowercased/name
+// key the importer's hpaByTarget join uses (with // "" mirroring its
+// target.kind ?? '' guards). NOTE: spec.replicas null means 1 in Kubernetes,
+// and jq's \`null != 0\` is true, so null-replica workloads are deliberately
+// KEPT — only an explicit 0 is filtered.
+const ZERO_REPLICA_FILTER = `([
+      .[]
+      | select(.kind != "HorizontalPodAutoscaler" and .replicas != 0)
+      | { key: "\\(.namespace)/\\(.kind | ascii_downcase)/\\(.name)", value: true }
+    ] | from_entries) as $kept
+    | map(select(
+        if .kind == "HorizontalPodAutoscaler"
+        then $kept["\\(.namespace)/\\((.target.kind // "") | ascii_downcase)/\\(.target.name // "")"] == true
+        else .replicas != 0
+        end
+      ))`
+
 const NODE_PROJECTION = `[
     .items[]
     | {
@@ -750,7 +769,7 @@ function shellQuote(value: string): string {
   return `'${value.replace(/'/g, `'\\''`)}'`
 }
 
-export function buildExportScript(namespace: string, selector: string): string {
+export function buildExportScript(namespace: string, selector: string, skipZeroReplicas = true): string {
   return `#!/usr/bin/env bash
 # kcap cluster export
 #
@@ -761,12 +780,17 @@ export function buildExportScript(namespace: string, selector: string): string {
 #   - node capacity, allocatable, labels, and taints (when permitted)
 #   - pod names, labels, and CPU/memory usage from metrics-server (when available)
 # It does NOT read env vars, images, annotations, or secrets.
+# Zero-replica workloads and their HPAs are dropped when SKIP_ZERO_REPLICAS=1.
 #
 # Writes kcap-export.json for the kcap import dialog.
 set -euo pipefail
 
 NAMESPACE=${shellQuote(namespace.trim())}
 SELECTOR=${shellQuote(selector.trim())}
+# Deployments/StatefulSets at spec.replicas 0 (progressive-delivery shells like
+# Flagger originals) and the HPAs targeting them are dropped from the export.
+# Set to 0 to capture zero-replica workloads and their HPAs too.
+SKIP_ZERO_REPLICAS=${skipZeroReplicas ? '1' : '0'}
 
 echo "cluster context: $(kubectl config current-context)" >&2
 
@@ -779,6 +803,14 @@ if [ -n "$SELECTOR" ]; then
 fi
 
 workloads=$(kubectl get deployments,statefulsets,horizontalpodautoscalers "\${scope[@]}" -o json | jq '${WORKLOAD_PROJECTION}')
+
+# spec.replicas null means 1 in Kubernetes (and jq's null != 0 is true), so
+# null-replica workloads survive this filter — only an explicit 0 is dropped.
+if [ "$SKIP_ZERO_REPLICAS" = "1" ]; then
+  before=$(jq 'length' <<<"$workloads")
+  workloads=$(jq '${ZERO_REPLICA_FILTER}' <<<"$workloads")
+  echo "skipped $((before - $(jq 'length' <<<"$workloads"))) zero-replica workload items (workloads at 0 and their HPAs; SKIP_ZERO_REPLICAS=0 keeps them)" >&2
+fi
 
 if kubectl auth can-i list nodes >/dev/null 2>&1; then
   nodes=$(kubectl get nodes -o json | jq '${NODE_PROJECTION}')
