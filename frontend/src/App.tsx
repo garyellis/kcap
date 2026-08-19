@@ -3,8 +3,10 @@ import type { ReactNode } from 'react'
 import './App.css'
 import { compareClusters } from './api'
 import type { ClusterConfig, CompareResponse, NodePool, PoolScenarioResult, Workload, WorkloadResult } from './api'
+import { ExportModal } from './components/ExportModal'
 import { NumberField, TextField, Toggle } from './components/Fields'
-import { BASELINE, cloneBaseline, createPool, createWorkload, nextPoolName, nextWorkloadName } from './defaults'
+import { ImportModal } from './components/ImportModal'
+import { cloneBaseline, createPool, createWorkload, nextPoolName, nextWorkloadName } from './defaults'
 
 const SCENARIOS = [
   ['hpa_min', 'HPA min'],
@@ -645,10 +647,14 @@ function ResultsPanel({
 }
 
 function App() {
-  const [candidate, setCandidate] = useState<ClusterConfig>(cloneBaseline)
+  // The locked comparison baseline. Reset restores the default; an import
+  // promotes the imported configuration so change count starts at zero.
+  const [baseline, setBaseline] = useState<ClusterConfig>(cloneBaseline)
+  const [candidate, setCandidate] = useState<ClusterConfig>(baseline)
   // The config the engine last saw. Auto mode mirrors the candidate into it;
   // manual mode holds it until "Run simulation".
   const [submitted, setSubmitted] = useState<ClusterConfig>(candidate)
+  const [modal, setModal] = useState<'export' | 'import' | null>(null)
   const [autoRun, setAutoRun] = useState(true)
   const [selection, setSelection] = useState<Selection>({ kind: 'workload', name: 'api' })
   const [comparison, setComparison] = useState<CompareResponse | null>(null)
@@ -663,7 +669,7 @@ function App() {
     // sliders fire continuously, and flashing the loading state on every
     // tick turns the results panel into a strobe.
     const timer = window.setTimeout(() => {
-      compareClusters(BASELINE, submitted, controller.signal)
+      compareClusters(baseline, submitted, controller.signal)
         .then((result) => {
           setComparison(result)
           setError(null)
@@ -679,7 +685,7 @@ function App() {
       window.clearTimeout(timer)
       controller.abort()
     }
-  }, [submitted])
+  }, [baseline, submitted])
 
   // Auto mode: every candidate edit is submitted immediately. Turning auto
   // back on also flushes whatever accumulated while it was off.
@@ -848,9 +854,20 @@ function App() {
 
   const reset = () => {
     const next = cloneBaseline()
+    setBaseline(next)
     setCandidate(next)
     setSubmitted(next)
     setSelection({ kind: 'workload', name: 'api' })
+  }
+
+  const applyImport = (next: ClusterConfig) => {
+    setBaseline(next)
+    setCandidate(next)
+    setSubmitted(next)
+    const firstWorkload = Object.keys(next.workloads)[0]
+    setSelection(firstWorkload
+      ? { kind: 'workload', name: firstWorkload }
+      : { kind: 'pool', name: Object.keys(next.node_pools)[0] })
   }
 
   const configDiff = comparison?.configuration_diff
@@ -877,10 +894,15 @@ function App() {
         </div>
         <div className="topbar-center"><strong>{poolNames.length === 1 ? poolNames[0] : `${poolNames.length} node pools`}</strong> · {Object.keys(candidate.workloads).length} workloads</div>
         <div className="topbar-meta">
+          <button className="topbar-button" type="button" onClick={() => setModal('export')}>Export</button>
+          <button className="topbar-button" type="button" onClick={() => setModal('import')}>Import</button>
           <span className={`connection connection--${status}`}><i />{status === 'live' ? 'Live' : status === 'error' ? 'Engine offline' : 'Calculating'}</span>
           <span className="revision">Model v1.1</span>
         </div>
       </header>
+
+      {modal === 'export' && <ExportModal config={candidate} onClose={() => setModal(null)} />}
+      {modal === 'import' && <ImportModal current={candidate} onApply={applyImport} onClose={() => setModal(null)} />}
 
       {error && <div className="error-callout"><strong>Configuration rejected.</strong><span>{error}</span></div>}
 

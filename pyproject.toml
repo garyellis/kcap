@@ -7,6 +7,7 @@ name = "kcap"
 version = "0.0.0"
 description = "Capacity planner that packs pod requests onto nodes to model HPA behavior, node counts, and the fragmentation aggregate arithmetic hides."
 readme = "README.md"
+license = "MIT"
 authors = [
     { name = "Gary Ellis", email = "gary.luis.ellis@gmail.com" }
 ]
