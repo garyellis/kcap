@@ -36,11 +36,11 @@ npm --prefix frontend run build
 
 [tasks.serve]
 description = "Run the API server."
-run = "uv run uvicorn kcap.api:app --host 0.0.0.0 --port 8000"
+run = "uv run uvicorn kcap.api:app --host 0.0.0.0 --port 8100"
 
 [tasks.api-dev]
 description = "Run the API server with automatic reload."
-run = "uv run uvicorn kcap.api:app --host 0.0.0.0 --port 8000 --reload"
+run = "uv run uvicorn kcap.api:app --host 0.0.0.0 --port 8100 --reload"
 
 [tasks.frontend-dev]
 description = "Run the Vite frontend development server."
@@ -49,7 +49,7 @@ run = "npm --prefix frontend run dev"
 [tasks.dev]
 description = "Run the API and frontend development servers."
 run = """
-uv run uvicorn kcap.api:app --host 0.0.0.0 --port 8000 --reload &
+uv run uvicorn kcap.api:app --host 0.0.0.0 --port 8100 --reload &
 api_pid=$!
 trap 'kill $api_pid 2>/dev/null || true' EXIT INT TERM
 npm --prefix frontend run dev
@@ -71,12 +71,12 @@ run = """
 docker build -t kcap:local .
 docker rm -f kcap 2>/dev/null || true
 docker run -d --name kcap --init \
-  -p 8000:8000 \
-  -e KCAP_CORS_ORIGINS=http://localhost:8000 \
+  -p 8100:8100 \
+  -e KCAP_CORS_ORIGINS=http://localhost:8100 \
   --read-only --tmpfs /tmp:rw,size=16m \
   --security-opt no-new-privileges:true \
   kcap:local
-echo "kcap running at http://localhost:8000 — stop with: mise run container-down"
+echo "kcap running at http://localhost:8100 — stop with: mise run container-down"
 """
 
 [tasks.container-down]

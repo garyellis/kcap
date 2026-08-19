@@ -10,7 +10,7 @@ FastAPI backend (Python 3.13, uv), React + Vite frontend. In production both are
 
 ```bash
 mise run setup   # install from the lockfiles
-mise run dev     # API on :8000, UI on :5173
+mise run dev     # API on :8100, UI on :5173
 ```
 
 `setup` installs strictly from the lockfiles, so add dependencies explicitly with `uv add <pkg>` or `npm install <pkg> --prefix frontend`.
@@ -25,7 +25,7 @@ The container builds the UI and serves it from the API on a single port:
 mise run container-up   # docker compose up --build
 ```
 
-Then open http://localhost:8000. Interactive API docs are at `/docs`.
+Then open http://localhost:8100. Interactive API docs are at `/docs`.
 
 ## The model
 
