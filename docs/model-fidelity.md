@@ -64,8 +64,9 @@ one of them reads as roomier than it is.
 ## Autoscaling
 
 **Replica formula.** kcap scales the current replica count, `ceil(current × ratio)`, from one
-average usage figure per pod. Upstream scales the *ready* count, over a population that excludes
-pods being deleted and substitutes missing metrics differently for scale-up and scale-down. kcap
+average usage figure per pod — `UsageStat.avg`; a p95 or peak carried alongside it never enters
+this formula. Upstream scales the *ready* count, over a population that excludes pods being
+deleted and substitutes missing metrics differently for scale-up and scale-down. kcap
 gives the number a fully ready, fully reported workload would get; add unready or unmetered pods
 and the cluster picks a different one.
 `engine.py` `evaluate_hpa`, `_metric_recommendation` ⇄ [`GetResourceReplicas`](https://github.com/kubernetes/kubernetes/blob/v1.33.0/pkg/controller/podautoscaler/replica_calculator.go#L115)

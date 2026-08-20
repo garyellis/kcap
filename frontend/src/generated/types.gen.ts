@@ -452,6 +452,35 @@ export type ScenarioResultSchema = {
 };
 
 /**
+ * UsageStatSchema
+ *
+ * Observed per-pod usage in one dimension, in that dimension's units.
+ *
+ * Which statistic is read is a convention: HPA math reads `avg`, sizing
+ * suggestions read `p95`, and exposure/entitlement analysis reads `peak`.
+ */
+export type UsageStatSchema = {
+    /**
+     * Avg
+     *
+     * Average observed usage per pod, in millicores or MiB. HPA utilization is computed from this value.
+     */
+    avg: number;
+    /**
+     * P95
+     *
+     * 95th-percentile observed usage per pod, when measured.
+     */
+    p95?: number | null;
+    /**
+     * Peak
+     *
+     * Maximum observed usage per pod, when measured. Must be at least avg, and at least p95 when both are given; a point-in-time snapshot cannot supply one. That ordering is a domain invariant, so violating it returns a 422 carrying a message rather than a field location.
+     */
+    peak?: number | null;
+};
+
+/**
  * ValidationError
  */
 export type ValidationError = {
@@ -569,15 +598,27 @@ export type WorkloadSchema = {
      */
     name: string;
     /**
+     * Observed CPU usage per pod in millicores.
+     */
+    observed_cpu_per_pod?: UsageStatSchema | null;
+    /**
      * Observed Cpu Per Pod M
      *
-     * Current average CPU usage per pod in millicores.
+     * Deprecated: send observed_cpu_per_pod.avg instead. A scalar was always an average, so it is accepted and normalized into observed_cpu_per_pod, which is where it is validated and where any error names it; responses never carry it.
+     *
+     * @deprecated
      */
     observed_cpu_per_pod_m?: number | null;
     /**
+     * Observed memory usage per pod in MiB.
+     */
+    observed_memory_per_pod?: UsageStatSchema | null;
+    /**
      * Observed Memory Per Pod Mib
      *
-     * Current average memory usage per pod in MiB.
+     * Deprecated: send observed_memory_per_pod.avg instead. A scalar was always an average, so it is accepted and normalized into observed_memory_per_pod, which is where it is validated and where any error names it; responses never carry it.
+     *
+     * @deprecated
      */
     observed_memory_per_pod_mib?: number | null;
     /**
@@ -588,6 +629,18 @@ export type WorkloadSchema = {
     pool?: string | null;
     resources: ResourcesSchema;
     rollout?: RolloutSchema;
+    /**
+     * Usage Source
+     *
+     * Where the observed usage came from, e.g. 'metrics-server-snapshot' or 'manual'.
+     */
+    usage_source?: string | null;
+    /**
+     * Usage Window Seconds
+     *
+     * Capture window behind the observed usage. Null or 0 means a point-in-time snapshot, which can report an average but no peak.
+     */
+    usage_window_seconds?: number | null;
 };
 
 export type HealthHealthGetData = {

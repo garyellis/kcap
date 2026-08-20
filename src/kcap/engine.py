@@ -21,6 +21,45 @@ class Resources:
     memory_limit_mib: int | None = None
 
 
+UsageBasis = Literal["peak", "p95", "avg"]
+
+
+@dataclass(frozen=True)
+class UsageStat:
+    """A summary of one workload's observed per-pod usage in one dimension.
+
+    Units follow the dimension: millicores for CPU, MiB for memory. Which
+    statistic a caller reads is a convention, not a preference — see the
+    accessors below and the field comments on `Workload`.
+    """
+
+    avg: int
+    p95: int | None = None
+    peak: int | None = None
+
+    def exposure(self) -> tuple[int, UsageBasis]:
+        """Value for exposure/entitlement math and the basis that produced it.
+
+        Exposure asks what a pod does at its busiest, so it reads the highest
+        statistic available and names the one it fell back to; a caller that
+        reports an exposure number must report the basis with it.
+        """
+        if self.peak is not None:
+            return self.peak, "peak"
+        if self.p95 is not None:
+            return self.p95, "p95"
+        return self.avg, "avg"
+
+    def sizing(self) -> int:
+        """Value for request-sizing suggestions.
+
+        Sizing reads p95: a request set from the average under-serves the pod
+        most of the time it matters, and one set from the peak buys idle
+        capacity for a spike the scheduler cannot pack around.
+        """
+        return self.p95 if self.p95 is not None else self.avg
+
+
 @dataclass(frozen=True)
 class HPA:
     min_replicas: int
@@ -48,9 +87,18 @@ class Workload:
     # current state
     current_replicas: int
 
-    # simulated / observed usage per pod
-    observed_cpu_per_pod_m: int | None = None
-    observed_memory_per_pod_mib: int | None = None
+    # Simulated / observed usage per pod. HPA math reads `avg`, because that is
+    # what the real HPA averages; the other statistics exist for the exposure
+    # and sizing questions and never move a replica count.
+    observed_cpu_per_pod: UsageStat | None = None
+    observed_memory_per_pod: UsageStat | None = None
+
+    # Capture window behind the statistics above. None or 0 means a
+    # point-in-time snapshot, which cannot honestly supply a peak; that is
+    # reported alongside the outputs it weakens, never refused.
+    usage_window_seconds: int | None = None
+    # Where the statistics came from, e.g. "metrics-server-snapshot", "manual".
+    usage_source: str | None = None
 
     hpa: HPA | None = None
     rollout: Rollout = field(default_factory=Rollout)
@@ -704,6 +752,35 @@ def _validate_pool_assignment(
     resolve_pool_name(cluster, workload)
 
 
+def _validate_usage_stat(
+    name: str,
+    dimension: str,
+    stat: UsageStat | None,
+) -> None:
+    """Check one usage summary for negative values and impossible ordering.
+
+    `peak` is a maximum, so it cannot sit below the mean or the 95th
+    percentile. `avg` and `p95` are deliberately left unordered: a distribution
+    with a long enough tail puts the mean above its own p95. Messages name the
+    statistic as the field spells it, so a rejected client can find it.
+    """
+    if stat is None:
+        return
+
+    for statistic, value in (("avg", stat.avg), ("p95", stat.p95), ("peak", stat.peak)):
+        if value is not None and value < 0:
+            raise ValueError(
+                f"{name}: observed {dimension} {statistic} cannot be negative"
+            )
+
+    if stat.peak is None:
+        return
+    if stat.peak < stat.avg:
+        raise ValueError(f"{name}: observed {dimension} peak cannot be below avg")
+    if stat.p95 is not None and stat.peak < stat.p95:
+        raise ValueError(f"{name}: observed {dimension} peak cannot be below p95")
+
+
 def _validate_workload(
     cluster: ClusterConfig,
     name: str,
@@ -718,16 +795,10 @@ def _validate_workload(
 
     if workload.current_replicas < 0:
         raise ValueError(f"{name}: replicas cannot be negative")
-    if (
-        workload.observed_cpu_per_pod_m is not None
-        and workload.observed_cpu_per_pod_m < 0
-    ):
-        raise ValueError(f"{name}: observed CPU cannot be negative")
-    if (
-        workload.observed_memory_per_pod_mib is not None
-        and workload.observed_memory_per_pod_mib < 0
-    ):
-        raise ValueError(f"{name}: observed memory cannot be negative")
+    _validate_usage_stat(name, "CPU", workload.observed_cpu_per_pod)
+    _validate_usage_stat(name, "memory", workload.observed_memory_per_pod)
+    if workload.usage_window_seconds is not None and workload.usage_window_seconds < 0:
+        raise ValueError(f"{name}: usage window cannot be negative")
     if workload.rollout.max_surge_percent < 0:
         raise ValueError(f"{name}: rollout max surge cannot be negative")
     if (
@@ -811,6 +882,12 @@ def evaluate_hpa(
     cpu_utilization = None
     memory_utilization = None
 
+    # Both metrics read `avg` and nothing else: the HPA controller compares the
+    # target against the current average utilization across the pod population,
+    # so a peak or p95 here would be a different controller.
+    observed_cpu = workload.observed_cpu_per_pod
+    observed_memory = workload.observed_memory_per_pod
+
     # Recommendations come only from usable metrics. If no metric is usable,
     # preserving current state is safer than pretending the HPA will scale.
     desired_candidates: list[int] = []
@@ -818,12 +895,10 @@ def evaluate_hpa(
     # CPU HPA
     if (
         workload.hpa.cpu_target_percentage is not None
-        and workload.observed_cpu_per_pod_m is not None
+        and observed_cpu is not None
         and workload.resources.cpu_request_m > 0
     ):
-        cpu_utilization = (
-            workload.observed_cpu_per_pod_m / workload.resources.cpu_request_m * 100
-        )
+        cpu_utilization = observed_cpu.avg / workload.resources.cpu_request_m * 100
 
         desired_candidates.append(
             _metric_recommendation(
@@ -836,13 +911,11 @@ def evaluate_hpa(
     # Memory HPA
     if (
         workload.hpa.memory_target_percentage is not None
-        and workload.observed_memory_per_pod_mib is not None
+        and observed_memory is not None
         and workload.resources.memory_request_mib > 0
     ):
         memory_utilization = (
-            workload.observed_memory_per_pod_mib
-            / workload.resources.memory_request_mib
-            * 100
+            observed_memory.avg / workload.resources.memory_request_mib * 100
         )
 
         desired_candidates.append(

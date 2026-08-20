@@ -227,6 +227,193 @@ def test_negative_max_surge_pods_is_rejected(
     assert response.status_code == 422
 
 
+def test_evaluate_accepts_the_legacy_scalar_usage_fields(
+    client: TestClient,
+    cluster_payload: dict[str, Any],
+) -> None:
+    # The fixture is written in the legacy form on purpose: the scalars are the
+    # shape every existing client and saved scenario file still sends.
+    assert "observed_cpu_per_pod_m" in cluster_payload["workloads"]["api"]
+
+    response = client.post("/v1/evaluate", json=cluster_payload)
+
+    assert response.status_code == 200
+    assert response.json()["workloads"]["api"]["cpu_utilization_percent"] == 80
+
+
+def test_a_legacy_zero_usage_is_carried_through_as_an_average_of_zero(
+    client: TestClient,
+    cluster_payload: dict[str, Any],
+) -> None:
+    # Zero is a measurement, not a missing value: an idle workload scales to
+    # the HPA floor. Dropping it would leave the metric unusable and hold the
+    # replica count where it is.
+    payload = deepcopy(cluster_payload)
+    payload["workloads"]["api"]["observed_cpu_per_pod_m"] = 0
+    payload["workloads"]["api"]["observed_memory_per_pod_mib"] = 0
+
+    response = client.post("/v1/evaluate", json=payload)
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["workloads"]["api"]["cpu_utilization_percent"] == 0
+    assert body["workloads"]["api"]["desired_replicas"] == 2
+
+
+def test_legacy_and_statistic_usage_forms_evaluate_identically(
+    client: TestClient,
+    cluster_payload: dict[str, Any],
+) -> None:
+    # A scalar was always an average, so the two payloads describe the same
+    # cluster and must produce the same ClusterResult, byte for byte.
+    modern = deepcopy(cluster_payload)
+    workload = modern["workloads"]["api"]
+    workload["observed_cpu_per_pod"] = {"avg": workload.pop("observed_cpu_per_pod_m")}
+    workload["observed_memory_per_pod"] = {
+        "avg": workload.pop("observed_memory_per_pod_mib")
+    }
+
+    legacy_body = client.post("/v1/evaluate", json=cluster_payload).json()
+    modern_body = client.post("/v1/evaluate", json=modern).json()
+
+    assert legacy_body["workloads"]["api"]["cpu_utilization_percent"] == 80
+    assert legacy_body == modern_body
+
+
+def test_usage_statistics_beyond_the_average_do_not_move_the_hpa(
+    client: TestClient,
+    cluster_payload: dict[str, Any],
+) -> None:
+    # p95 and peak are carried for the exposure and sizing questions; the
+    # replica math reads the average and nothing else.
+    payload = deepcopy(cluster_payload)
+    workload = payload["workloads"]["api"]
+    average = workload.pop("observed_cpu_per_pod_m")
+    workload["observed_cpu_per_pod"] = {"avg": average, "p95": 480, "peak": 950}
+    workload["usage_window_seconds"] = 300
+    workload["usage_source"] = "metrics-server-samples"
+
+    response = client.post("/v1/evaluate", json=payload)
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["workloads"]["api"]["cpu_utilization_percent"] == 80
+    assert body["workloads"]["api"]["desired_replicas"] == 5
+
+
+def test_both_usage_forms_for_one_dimension_are_rejected(
+    client: TestClient,
+    cluster_payload: dict[str, Any],
+) -> None:
+    payload = deepcopy(cluster_payload)
+    payload["workloads"]["api"]["observed_cpu_per_pod"] = {"avg": 400}
+
+    response = client.post("/v1/evaluate", json=payload)
+
+    assert response.status_code == 422
+    assert "not both" in response.text
+
+
+def test_a_null_legacy_field_beside_the_new_form_is_not_a_conflict(
+    client: TestClient,
+    cluster_payload: dict[str, Any],
+) -> None:
+    # Two forms means two values, not two keys: a client that names every
+    # field it knows sends the one it does not use as null, and every saved
+    # scenario file written before the statistics existed does exactly that.
+    payload = deepcopy(cluster_payload)
+    workload = payload["workloads"]["api"]
+    workload["observed_cpu_per_pod"] = {"avg": workload["observed_cpu_per_pod_m"]}
+    workload["observed_cpu_per_pod_m"] = None
+
+    response = client.post("/v1/evaluate", json=payload)
+
+    assert response.status_code == 200
+    assert response.json()["workloads"]["api"]["cpu_utilization_percent"] == 80
+
+
+def test_a_peak_below_the_average_is_rejected(
+    client: TestClient,
+    cluster_payload: dict[str, Any],
+) -> None:
+    # A maximum cannot sit below the mean it summarises.
+    payload = deepcopy(cluster_payload)
+    del payload["workloads"]["api"]["observed_cpu_per_pod_m"]
+    payload["workloads"]["api"]["observed_cpu_per_pod"] = {"avg": 400, "peak": 399}
+
+    response = client.post("/v1/evaluate", json=payload)
+
+    assert response.status_code == 422
+    assert "peak cannot be below avg" in response.text
+
+
+def test_a_negative_usage_statistic_is_rejected(
+    client: TestClient,
+    cluster_payload: dict[str, Any],
+) -> None:
+    payload = deepcopy(cluster_payload)
+    del payload["workloads"]["api"]["observed_cpu_per_pod_m"]
+    payload["workloads"]["api"]["observed_cpu_per_pod"] = {"avg": 400, "p95": -1}
+
+    response = client.post("/v1/evaluate", json=payload)
+
+    assert response.status_code == 422
+    # Named where the client can find it, not just refused.
+    assert response.json()["detail"][0]["loc"][-2:] == ["observed_cpu_per_pod", "p95"]
+
+
+def test_compare_reports_usage_changes_per_statistic(
+    client: TestClient,
+    cluster_payload: dict[str, Any],
+) -> None:
+    # The diff path follows the new shape: usage is a statistic, not a scalar.
+    baseline = deepcopy(cluster_payload)
+    workload = baseline["workloads"]["api"]
+    workload["observed_cpu_per_pod"] = {"avg": workload.pop("observed_cpu_per_pod_m")}
+    candidate = deepcopy(baseline)
+    candidate["workloads"]["api"]["observed_cpu_per_pod"] = {"avg": 450, "peak": 900}
+
+    response = client.post(
+        "/v1/compare",
+        json={"baseline": baseline, "candidate": candidate},
+    )
+
+    assert response.status_code == 200
+    changes = response.json()["configuration_diff"]["changes"]
+    assert changes["workloads.api.observed_cpu_per_pod.avg"] == {
+        "before": 400,
+        "after": 450,
+    }
+    assert changes["workloads.api.observed_cpu_per_pod.peak"] == {
+        "before": None,
+        "after": 900,
+    }
+
+
+def test_compare_reports_usage_appearing_as_one_change(
+    client: TestClient,
+    cluster_payload: dict[str, Any],
+) -> None:
+    # Usage arriving where there was none has no per-statistic before value to
+    # compare against, so the whole summary is the change.
+    baseline = deepcopy(cluster_payload)
+    del baseline["workloads"]["api"]["observed_cpu_per_pod_m"]
+    candidate = deepcopy(baseline)
+    candidate["workloads"]["api"]["observed_cpu_per_pod"] = {"avg": 400}
+
+    response = client.post(
+        "/v1/compare",
+        json={"baseline": baseline, "candidate": candidate},
+    )
+
+    assert response.status_code == 200
+    changes = response.json()["configuration_diff"]["changes"]
+    assert changes["workloads.api.observed_cpu_per_pod"] == {
+        "before": None,
+        "after": {"avg": 400, "p95": None, "peak": None},
+    }
+
+
 def test_compare_returns_configuration_and_impact_diffs(
     client: TestClient,
     cluster_payload: dict[str, Any],

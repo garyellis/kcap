@@ -69,12 +69,16 @@ Then open http://localhost:8100. Interactive API docs are at `/docs`.
 - **Inputs.** One or more node pools — machine size, per-node reserved CPU and
   memory, `max_pods`, min/current/max node counts — plus workloads with per-pod
   requests, current replicas, observed per-pod usage, an optional HPA, and a
-  rollout max-surge. Each workload is pinned to one pool (the assignment may be
-  omitted only when there is a single pool). CPU is millicores, memory is MiB.
-- **HPA math follows Kubernetes.** Utilization is `usage / request` per pod,
-  each configured metric produces its own replica recommendation, the highest
-  wins, and a ratio within 10% of target holds steady — the same tolerance band
-  as `--horizontal-pod-autoscaler-tolerance`. Results carry both the raw
+  rollout max-surge. Observed usage is a summary — `avg`, plus optional `p95`
+  and `peak` — alongside the capture window and source it came from. Each
+  workload is pinned to one pool (the assignment may be omitted only when there
+  is a single pool). CPU is millicores, memory is MiB.
+- **HPA math follows Kubernetes.** Utilization is `usage / request` per pod and
+  reads the average usage, nothing else — the controller compares its target
+  against current *average* utilization. Each configured metric produces its
+  own replica recommendation, the highest wins, and a ratio within 10% of
+  target holds steady — the same tolerance band as
+  `--horizontal-pod-autoscaler-tolerance`. Results carry both the raw
   recommendation and the one clamped to min/max, so a saturated HPA is visible
   instead of quietly capped.
 - **Placement is first-fit-decreasing bin packing** against allocatable
@@ -103,6 +107,9 @@ POST /v1/compare     {baseline, candidate} -> both results, config diff, impact 
   HPA scenarios show the shape of the response, not a converged steady state.
 - Container limits are imported and validated but don't affect placement, HPA
   math, or node counts.
+- Only the `avg` of observed usage is read, by the HPA math. `p95`, `peak`, the
+  capture window, and the usage source are accepted and validated but affect no
+  result yet.
 - First-fit-decreasing is a heuristic; the real scheduler will sometimes do
   better and sometimes worse.
 

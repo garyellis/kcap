@@ -76,19 +76,98 @@ class RolloutSchema(ApiModel):
         return engine.Rollout(**self.model_dump())
 
 
+class UsageStatSchema(ApiModel):
+    """Observed per-pod usage in one dimension, in that dimension's units.
+
+    Which statistic is read is a convention: HPA math reads `avg`, sizing
+    suggestions read `p95`, and exposure/entitlement analysis reads `peak`.
+    """
+
+    avg: int = Field(
+        ge=0,
+        description=(
+            "Average observed usage per pod, in millicores or MiB. HPA "
+            "utilization is computed from this value."
+        ),
+    )
+    p95: int | None = Field(
+        default=None,
+        ge=0,
+        description="95th-percentile observed usage per pod, when measured.",
+    )
+    peak: int | None = Field(
+        default=None,
+        ge=0,
+        description=(
+            "Maximum observed usage per pod, when measured. Must be at least "
+            "avg, and at least p95 when both are given; a point-in-time "
+            "snapshot cannot supply one. That ordering is a domain invariant, "
+            "so violating it returns a 422 carrying a message rather than a "
+            "field location."
+        ),
+    )
+
+    def to_domain(self) -> engine.UsageStat:
+        return engine.UsageStat(**self.model_dump())
+
+
+# Pre-distribution scalar usage fields, mapped to the field that replaced each.
+_LEGACY_USAGE_FIELDS = {
+    "observed_cpu_per_pod_m": "observed_cpu_per_pod",
+    "observed_memory_per_pod_mib": "observed_memory_per_pod",
+}
+
+
 class WorkloadSchema(ApiModel):
     name: str = Field(min_length=1)
     resources: ResourcesSchema
     current_replicas: int = Field(ge=0)
-    observed_cpu_per_pod_m: int | None = Field(
+    observed_cpu_per_pod: UsageStatSchema | None = Field(
+        default=None,
+        description="Observed CPU usage per pod in millicores.",
+    )
+    observed_memory_per_pod: UsageStatSchema | None = Field(
+        default=None,
+        description="Observed memory usage per pod in MiB.",
+    )
+    usage_window_seconds: int | None = Field(
         default=None,
         ge=0,
-        description="Current average CPU usage per pod in millicores.",
+        description=(
+            "Capture window behind the observed usage. Null or 0 means a "
+            "point-in-time snapshot, which can report an average but no peak."
+        ),
+    )
+    usage_source: str | None = Field(
+        default=None,
+        min_length=1,
+        description=(
+            "Where the observed usage came from, e.g. "
+            "'metrics-server-snapshot' or 'manual'."
+        ),
+    )
+    # Declared so the deprecation is visible in the OpenAPI schema and the
+    # generated client types. _accept_legacy_usage consumes them before field
+    # validation, so a validated model always carries None here.
+    observed_cpu_per_pod_m: int | None = Field(
+        default=None,
+        deprecated=True,
+        description=(
+            "Deprecated: send observed_cpu_per_pod.avg instead. A scalar was "
+            "always an average, so it is accepted and normalized into "
+            "observed_cpu_per_pod, which is where it is validated and where "
+            "any error names it; responses never carry it."
+        ),
     )
     observed_memory_per_pod_mib: int | None = Field(
         default=None,
-        ge=0,
-        description="Current average memory usage per pod in MiB.",
+        deprecated=True,
+        description=(
+            "Deprecated: send observed_memory_per_pod.avg instead. A scalar "
+            "was always an average, so it is accepted and normalized into "
+            "observed_memory_per_pod, which is where it is validated and "
+            "where any error names it; responses never carry it."
+        ),
     )
     hpa: HpaSchema | None = None
     rollout: RolloutSchema = Field(default_factory=RolloutSchema)
@@ -101,13 +180,53 @@ class WorkloadSchema(ApiModel):
         ),
     )
 
+    @model_validator(mode="before")
+    @classmethod
+    def _accept_legacy_usage(_cls, data: Any) -> Any:
+        """Normalize the pre-distribution scalar usage fields into statistics.
+
+        A scalar observed value was always an average, so it becomes
+        `{"avg": value}`. Runs before field validation, and refuses both forms
+        for one dimension, on the _accept_legacy_node_pool precedent.
+
+        Two forms means two *values*, not two keys: unlike the legacy
+        node_pool, both usage fields are declared and nullable, and a client
+        that names every field it knows sends the one it does not use as null.
+        """
+        if not isinstance(data, dict):
+            return data
+        legacy_keys = [key for key in _LEGACY_USAGE_FIELDS if key in data]
+        if not legacy_keys:
+            return data
+
+        data = dict(data)
+        for legacy in legacy_keys:
+            current = _LEGACY_USAGE_FIELDS[legacy]
+            value = data.pop(legacy)
+            if value is None:
+                continue
+            if data.get(current) is not None:
+                raise ValueError(f"Provide {current} or the legacy {legacy}, not both")
+            data[current] = {"avg": value}
+        return data
+
     def to_domain(self) -> engine.Workload:
         return engine.Workload(
             name=self.name,
             resources=self.resources.to_domain(),
             current_replicas=self.current_replicas,
-            observed_cpu_per_pod_m=self.observed_cpu_per_pod_m,
-            observed_memory_per_pod_mib=self.observed_memory_per_pod_mib,
+            observed_cpu_per_pod=(
+                self.observed_cpu_per_pod.to_domain()
+                if self.observed_cpu_per_pod is not None
+                else None
+            ),
+            observed_memory_per_pod=(
+                self.observed_memory_per_pod.to_domain()
+                if self.observed_memory_per_pod is not None
+                else None
+            ),
+            usage_window_seconds=self.usage_window_seconds,
+            usage_source=self.usage_source,
             hpa=self.hpa.to_domain() if self.hpa is not None else None,
             rollout=self.rollout.to_domain(),
             pool=self.pool,

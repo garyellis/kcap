@@ -83,3 +83,7 @@ Use mise for repository tasks.
   the OpenAPI contract, production build, and security scans.
 - Fix change-caused failures. If another failure remains, report its command and
   relevant output; do not claim full verification.
+- `docs/ui-regression-scenarios.md` is the manual browser checklist for readouts a
+  green suite cannot prove. Changing UI behavior means walking the affected
+  scenarios and adding one for the behavior in the same change; a scenario is
+  marked verified only on the date someone actually ran it.

@@ -5,12 +5,14 @@ import pytest
 
 from kcap.engine import (
     HPA,
+    HPA_TOLERANCE,
     ClusterConfig,
     ClusterResult,
     MachineSpec,
     NodePool,
     Resources,
     Rollout,
+    UsageStat,
     Workload,
     WorkloadResult,
     add_workload,
@@ -83,7 +85,7 @@ class TestHpa:
                 name="api",
                 resources=Resources(500, 1000),
                 current_replicas=8,
-                observed_cpu_per_pod_m=125,
+                observed_cpu_per_pod=UsageStat(125),
                 hpa=HPA(2, 20, cpu_target_percentage=50),
             )
         )
@@ -99,8 +101,8 @@ class TestHpa:
                 name="api",
                 resources=Resources(500, 1000),
                 current_replicas=4,
-                observed_cpu_per_pod_m=250,
-                observed_memory_per_pod_mib=1500,
+                observed_cpu_per_pod=UsageStat(250),
+                observed_memory_per_pod=UsageStat(1500),
                 hpa=HPA(
                     2,
                     20,
@@ -122,7 +124,7 @@ class TestHpa:
                 name="api",
                 resources=Resources(500, 256),
                 current_replicas=4,
-                observed_cpu_per_pod_m=1000,
+                observed_cpu_per_pod=UsageStat(1000),
                 hpa=HPA(2, 6, cpu_target_percentage=50),
             )
         )
@@ -132,7 +134,7 @@ class TestHpa:
                 "api": replace(
                     high.workloads["api"],
                     current_replicas=1,
-                    observed_cpu_per_pod_m=0,
+                    observed_cpu_per_pod=UsageStat(0),
                 )
             },
         )
@@ -338,18 +340,72 @@ class TestValidation:
                     "api",
                     Resources(100, 128),
                     current_replicas=1,
-                    observed_cpu_per_pod_m=-1,
+                    observed_cpu_per_pod=UsageStat(-1),
                 ),
-                "api: observed CPU cannot be negative",
+                "api: observed CPU avg cannot be negative",
             ),
             (
                 Workload(
                     "api",
                     Resources(100, 128),
                     current_replicas=1,
-                    observed_memory_per_pod_mib=-1,
+                    observed_cpu_per_pod=UsageStat(100, p95=-1),
                 ),
-                "api: observed memory cannot be negative",
+                "api: observed CPU p95 cannot be negative",
+            ),
+            (
+                Workload(
+                    "api",
+                    Resources(100, 128),
+                    current_replicas=1,
+                    observed_cpu_per_pod=UsageStat(100, peak=-1),
+                ),
+                "api: observed CPU peak cannot be negative",
+            ),
+            (
+                Workload(
+                    "api",
+                    Resources(100, 128),
+                    current_replicas=1,
+                    observed_cpu_per_pod=UsageStat(200, peak=199),
+                ),
+                "api: observed CPU peak cannot be below avg",
+            ),
+            (
+                Workload(
+                    "api",
+                    Resources(100, 128),
+                    current_replicas=1,
+                    observed_cpu_per_pod=UsageStat(100, p95=300, peak=200),
+                ),
+                "api: observed CPU peak cannot be below p95",
+            ),
+            (
+                Workload(
+                    "api",
+                    Resources(100, 128),
+                    current_replicas=1,
+                    observed_memory_per_pod=UsageStat(-1),
+                ),
+                "api: observed memory avg cannot be negative",
+            ),
+            (
+                Workload(
+                    "api",
+                    Resources(100, 128),
+                    current_replicas=1,
+                    observed_memory_per_pod=UsageStat(512, peak=256),
+                ),
+                "api: observed memory peak cannot be below avg",
+            ),
+            (
+                Workload(
+                    "api",
+                    Resources(100, 128),
+                    current_replicas=1,
+                    usage_window_seconds=-1,
+                ),
+                "api: usage window cannot be negative",
             ),
             (
                 Workload(
@@ -528,7 +584,7 @@ class TestHpaTolerance:
                 name="api",
                 resources=Resources(1000, 1000),
                 current_replicas=10,
-                observed_cpu_per_pod_m=750,
+                observed_cpu_per_pod=UsageStat(750),
                 hpa=HPA(1, 50, cpu_target_percentage=70),
             )
         )
@@ -543,7 +599,7 @@ class TestHpaTolerance:
                 name="api",
                 resources=Resources(1000, 1000),
                 current_replicas=10,
-                observed_cpu_per_pod_m=850,
+                observed_cpu_per_pod=UsageStat(850),
                 hpa=HPA(1, 50, cpu_target_percentage=70),
             )
         )
@@ -560,7 +616,7 @@ class TestHpaSaturation:
                 name="api",
                 resources=Resources(200, 256),
                 current_replicas=9,
-                observed_cpu_per_pod_m=1400,
+                observed_cpu_per_pod=UsageStat(1400),
                 hpa=HPA(3, 9, cpu_target_percentage=80),
             )
         )
@@ -578,7 +634,7 @@ class TestHpaSaturation:
                 name="api",
                 resources=Resources(2000, 256),
                 current_replicas=9,
-                observed_cpu_per_pod_m=1400,
+                observed_cpu_per_pod=UsageStat(1400),
                 hpa=HPA(3, 9, cpu_target_percentage=80),
             )
         )
@@ -596,7 +652,7 @@ class TestHpaSaturation:
                 name="api",
                 resources=Resources(200, 256),
                 current_replicas=9,
-                observed_cpu_per_pod_m=1400,
+                observed_cpu_per_pod=UsageStat(1400),
                 hpa=HPA(3, 9, cpu_target_percentage=80),
             )
         )
@@ -614,7 +670,7 @@ class TestHpaSaturation:
                 name="api",
                 resources=Resources(1000, 256),
                 current_replicas=2,
-                observed_cpu_per_pod_m=100,
+                observed_cpu_per_pod=UsageStat(100),
                 hpa=HPA(6, 12, cpu_target_percentage=80),
             )
         )
@@ -657,7 +713,7 @@ def representative_cluster(
                 name="api",
                 resources=Resources(500, 256, cpu_limit_m=1000),
                 current_replicas=4,
-                observed_cpu_per_pod_m=400,
+                observed_cpu_per_pod=UsageStat(400),
                 hpa=HPA(2, 10, cpu_target_percentage=70),
                 rollout=rollouts.get("api", Rollout()),
                 pool="default",
@@ -666,7 +722,7 @@ def representative_cluster(
                 name="worker",
                 resources=Resources(250, 512),
                 current_replicas=3,
-                observed_memory_per_pod_mib=384,
+                observed_memory_per_pod=UsageStat(384),
                 rollout=rollouts.get("worker", Rollout(max_surge_percent=10)),
                 pool="default",
             ),
@@ -674,7 +730,7 @@ def representative_cluster(
                 name="cache",
                 resources=Resources(1000, 8192),
                 current_replicas=2,
-                observed_memory_per_pod_mib=6000,
+                observed_memory_per_pod=UsageStat(6000),
                 hpa=HPA(1, 5, memory_target_percentage=60),
                 rollout=rollouts.get("cache", Rollout()),
                 pool="highmem",
@@ -762,6 +818,232 @@ def percent_only_evaluate(cluster: ClusterConfig) -> ClusterResult:
             for scenario_name, replicas in replicas_by_scenario.items()
         },
     )
+
+
+def scalar_usage_evaluate(
+    cluster: ClusterConfig,
+    scalars: dict[str, tuple[int | None, int | None]],
+) -> ClusterResult:
+    """The pre-P1.1 evaluate(), reproduced with no knowledge of UsageStat.
+
+    Observed usage is read here as one scalar per dimension, taken from
+    `scalars`, exactly as engine.evaluate_hpa read Workload's
+    observed_cpu_per_pod_m / observed_memory_per_pod_mib before the
+    distribution summary existed. Everything downstream of the HPA numbers is
+    the shipped engine, so a difference in the compared result can only come
+    from the usage change.
+    """
+    workload_results: dict[str, WorkloadResult] = {}
+    for name, workload in cluster.workloads.items():
+        observed_cpu_m, observed_memory_mib = scalars[name]
+        cpu_utilization: float | None = None
+        memory_utilization: float | None = None
+        desired_candidates: list[int] = []
+
+        if workload.hpa is None:
+            raw_desired_replicas = workload.current_replicas
+            desired_replicas = workload.current_replicas
+            max_replicas = workload.current_replicas
+        else:
+            if (
+                workload.hpa.cpu_target_percentage is not None
+                and observed_cpu_m is not None
+                and workload.resources.cpu_request_m > 0
+            ):
+                cpu_utilization = (
+                    observed_cpu_m / workload.resources.cpu_request_m * 100
+                )
+                desired_candidates.append(
+                    _scalar_metric_recommendation(
+                        workload.current_replicas,
+                        cpu_utilization,
+                        workload.hpa.cpu_target_percentage,
+                    )
+                )
+            if (
+                workload.hpa.memory_target_percentage is not None
+                and observed_memory_mib is not None
+                and workload.resources.memory_request_mib > 0
+            ):
+                memory_utilization = (
+                    observed_memory_mib / workload.resources.memory_request_mib * 100
+                )
+                desired_candidates.append(
+                    _scalar_metric_recommendation(
+                        workload.current_replicas,
+                        memory_utilization,
+                        workload.hpa.memory_target_percentage,
+                    )
+                )
+            raw_desired_replicas = (
+                max(desired_candidates)
+                if desired_candidates
+                else workload.current_replicas
+            )
+            desired_replicas = max(
+                workload.hpa.min_replicas,
+                min(raw_desired_replicas, workload.hpa.max_replicas),
+            )
+            max_replicas = workload.hpa.max_replicas
+
+        if workload.rollout.max_surge_pods is not None:
+            surge = workload.rollout.max_surge_pods
+        else:
+            surge = ceil(max_replicas * workload.rollout.max_surge_percent / 100)
+
+        workload_results[name] = WorkloadResult(
+            name=workload.name,
+            cpu_utilization_percent=cpu_utilization,
+            memory_utilization_percent=memory_utilization,
+            current_replicas=workload.current_replicas,
+            raw_desired_replicas=raw_desired_replicas,
+            desired_replicas=desired_replicas,
+            max_replicas=max_replicas,
+            rollout_replicas_at_max=max_replicas + surge,
+        )
+
+    replicas_by_scenario = {
+        "hpa_min": {
+            name: min_replicas_for(cluster.workloads[name]) for name in workload_results
+        },
+        "current": {
+            name: result.current_replicas for name, result in workload_results.items()
+        },
+        "hpa_desired": {
+            name: result.desired_replicas for name, result in workload_results.items()
+        },
+        "hpa_max": {
+            name: result.max_replicas for name, result in workload_results.items()
+        },
+        "hpa_max_rollout": {
+            name: result.rollout_replicas_at_max
+            for name, result in workload_results.items()
+        },
+    }
+
+    return ClusterResult(
+        workloads=workload_results,
+        scenarios={
+            scenario_name: evaluate_scenario(scenario_name, cluster, replicas)
+            for scenario_name, replicas in replicas_by_scenario.items()
+        },
+    )
+
+
+def _scalar_metric_recommendation(
+    current_replicas: int,
+    utilization_percent: float,
+    target_percentage: float,
+) -> int:
+    """The pre-P1.1 single-metric recommendation, tolerance band included."""
+    ratio = utilization_percent / target_percentage
+    if abs(ratio - 1) <= HPA_TOLERANCE:
+        return current_replicas
+    return ceil(current_replicas * ratio)
+
+
+def _with_tails(stat: UsageStat | None) -> UsageStat | None:
+    """Same average, with a p95 and a peak far above it."""
+    if stat is None:
+        return None
+    return replace(stat, p95=stat.avg * 2 + 7, peak=stat.avg * 3 + 11)
+
+
+class TestUsageStatistics:
+    """Observed usage is a distribution summary; HPA still reads its average.
+
+    The convention is enforced at the call site, so these tests pin both
+    halves: HPA numbers must not move for avg-only stats, and adding p95/peak
+    to a workload must not move them either.
+    """
+
+    def test_exposure_prefers_peak_then_p95_then_average(self) -> None:
+        assert UsageStat(avg=100, p95=180, peak=240).exposure() == (240, "peak")
+        assert UsageStat(avg=100, p95=180).exposure() == (180, "p95")
+        assert UsageStat(avg=100).exposure() == (100, "avg")
+
+    def test_exposure_falls_back_past_a_missing_statistic(self) -> None:
+        # p95 absent, peak present: the chain skips the gap rather than
+        # stopping at it.
+        assert UsageStat(avg=100, peak=240).exposure() == (240, "peak")
+
+    def test_sizing_prefers_p95_and_falls_back_to_average(self) -> None:
+        # Sizing never reads peak: a request bought for the maximum is idle
+        # capacity the scheduler cannot pack around.
+        assert UsageStat(avg=100, p95=180, peak=240).sizing() == 180
+        assert UsageStat(avg=100, peak=240).sizing() == 100
+
+    def test_hpa_reads_the_average_and_ignores_the_other_statistics(self) -> None:
+        # 400m against a 500m request is 80% utilization at a 70% target, which
+        # scales 4 replicas to 5. Reading p95 or peak here would give 6 or 7.
+        def cluster_for(usage: UsageStat) -> ClusterConfig:
+            return cluster_with(
+                Workload(
+                    name="api",
+                    resources=Resources(500, 256),
+                    current_replicas=4,
+                    observed_cpu_per_pod=usage,
+                    hpa=HPA(2, 10, cpu_target_percentage=70),
+                )
+            )
+
+        average_only = evaluate(cluster_for(UsageStat(avg=400)))
+        with_tail = evaluate(cluster_for(UsageStat(avg=400, p95=550, peak=700)))
+
+        assert average_only.workloads["api"].cpu_utilization_percent == 80
+        assert average_only.workloads["api"].desired_replicas == 5
+        assert asdict(average_only) == asdict(with_tail)
+
+    def test_average_only_stats_evaluate_identically_to_the_scalar_engine(
+        self,
+    ) -> None:
+        """Regression proof that UsageStat is inert for avg-only usage.
+
+        The representative multi-workload, multi-pool configuration is
+        evaluated twice: once through the shipped engine and once through
+        scalar_usage_evaluate(), which reads the same numbers the way the
+        engine read them before UsageStat existed. The comparison is over the
+        whole ClusterResult via dataclasses.asdict -- both utilization
+        percentages, every replica number, and every field of all five
+        scenarios, per pool.
+        """
+        # Spelled out rather than read off the fixture, so the shadow engine
+        # never sources its inputs from the accessor under test. These are
+        # representative_cluster()'s (cpu_m, memory_mib) per workload.
+        scalars: dict[str, tuple[int | None, int | None]] = {
+            "api": (400, None),
+            "worker": (None, 384),
+            "cache": (None, 6000),
+        }
+
+        cluster = representative_cluster()
+
+        assert asdict(evaluate(cluster)) == asdict(
+            scalar_usage_evaluate(cluster, scalars)
+        )
+
+    def test_adding_tail_statistics_moves_nothing_in_the_whole_result(
+        self,
+    ) -> None:
+        # The convention across the full multi-workload, multi-pool fixture:
+        # give every observed statistic a p95 and a peak well above its
+        # average, and no number anywhere in the result may move.
+        plain = representative_cluster()
+        with_tails = replace(
+            plain,
+            workloads={
+                name: replace(
+                    workload,
+                    observed_cpu_per_pod=_with_tails(workload.observed_cpu_per_pod),
+                    observed_memory_per_pod=_with_tails(
+                        workload.observed_memory_per_pod
+                    ),
+                )
+                for name, workload in plain.workloads.items()
+            },
+        )
+
+        assert asdict(evaluate(plain)) == asdict(evaluate(with_tails))
 
 
 class TestRolloutAbsoluteSurge:
