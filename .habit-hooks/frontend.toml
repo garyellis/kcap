@@ -1,0 +1,2 @@
+plugins = ["typescript"]
+files = ["src/**/*.ts", "src/**/*.tsx", "!src/generated/**"]

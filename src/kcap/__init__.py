@@ -1,7 +1,8 @@
 """kcap package."""
 
 import os
-from importlib.metadata import PackageNotFoundError, version as _distribution_version
+from importlib.metadata import PackageNotFoundError
+from importlib.metadata import version as _distribution_version
 
 _PLACEHOLDER_VERSION = "0.0.0"
 
@@ -32,7 +33,7 @@ def main() -> None:
 
     uvicorn.run(
         "kcap.api:app",
-        host="0.0.0.0",
+        host="0.0.0.0",  # noqa: S104 - the packaged server must accept remote traffic
         port=8100,
         reload=False,
     )

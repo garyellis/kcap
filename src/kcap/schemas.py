@@ -159,7 +159,7 @@ class ClusterConfigSchema(ApiModel):
 
     @model_validator(mode="before")
     @classmethod
-    def _accept_legacy_node_pool(cls, data: Any) -> Any:
+    def _accept_legacy_node_pool(_cls, data: Any) -> Any:
         """Normalize the pre-multi-pool `node_pool` key into `node_pools`.
 
         Runs before field validation because extra="forbid" would otherwise
@@ -180,8 +180,12 @@ class ClusterConfigSchema(ApiModel):
 
     def to_domain(self) -> engine.ClusterConfig:
         return engine.ClusterConfig(
-            workloads={name: workload.to_domain() for name, workload in self.workloads.items()},
-            node_pools={name: pool.to_domain() for name, pool in self.node_pools.items()},
+            workloads={
+                name: workload.to_domain() for name, workload in self.workloads.items()
+            },
+            node_pools={
+                name: pool.to_domain() for name, pool in self.node_pools.items()
+            },
         )
 
 

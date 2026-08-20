@@ -136,9 +136,7 @@ def test_compare_returns_configuration_and_impact_diffs(
         "workloads.api.resources.cpu_limit_m"
     ]
     assert limit_change == {"before": 1000, "after": 1500}
-    assert body["impact_diff"]["scenarios"]["current"]["nodes_required"][
-        "delta"
-    ] == 0
+    assert body["impact_diff"]["scenarios"]["current"]["nodes_required"]["delta"] == 0
 
 
 def test_compare_supports_node_overhead_limits_and_multiple_workloads(
@@ -215,9 +213,7 @@ def test_node_pool_and_node_pools_together_are_rejected(
     client: TestClient,
     cluster_payload: dict[str, Any],
 ) -> None:
-    cluster_payload["node_pool"] = deepcopy(
-        cluster_payload["node_pools"]["default"]
-    )
+    cluster_payload["node_pool"] = deepcopy(cluster_payload["node_pools"]["default"])
 
     response = client.post("/v1/evaluate", json=cluster_payload)
 

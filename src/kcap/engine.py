@@ -2,8 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field, fields, is_dataclass, replace
 from math import ceil
-from typing import Any, Optional
-
+from typing import Any
 
 # Kubernetes does not act on a metric whose ratio to target sits inside this
 # band. Mirrors --horizontal-pod-autoscaler-tolerance.
@@ -18,8 +17,8 @@ class Resources:
     cpu_request_m: int
     memory_request_mib: int
 
-    cpu_limit_m: Optional[int] = None
-    memory_limit_mib: Optional[int] = None
+    cpu_limit_m: int | None = None
+    memory_limit_mib: int | None = None
 
 
 @dataclass(frozen=True)
@@ -27,8 +26,8 @@ class HPA:
     min_replicas: int
     max_replicas: int
 
-    cpu_target_percentage: Optional[float] = None
-    memory_target_percentage: Optional[float] = None
+    cpu_target_percentage: float | None = None
+    memory_target_percentage: float | None = None
 
 
 @dataclass(frozen=True)
@@ -46,15 +45,15 @@ class Workload:
     current_replicas: int
 
     # simulated / observed usage per pod
-    observed_cpu_per_pod_m: Optional[int] = None
-    observed_memory_per_pod_mib: Optional[int] = None
+    observed_cpu_per_pod_m: int | None = None
+    observed_memory_per_pod_mib: int | None = None
 
-    hpa: Optional[HPA] = None
+    hpa: HPA | None = None
     rollout: Rollout = field(default_factory=Rollout)
 
     # Node pool this workload is pinned to. None resolves to the only pool;
     # with several pools the assignment must be explicit.
-    pool: Optional[str] = None
+    pool: str | None = None
 
 
 @dataclass(frozen=True)
@@ -87,11 +86,11 @@ class NodePool:
     current_nodes: int
     max_nodes: int
 
+
 @dataclass(frozen=True)
 class ClusterConfig:
     workloads: dict[str, Workload]
     node_pools: dict[str, NodePool]
-
 
 
 # RESULT MODELS
@@ -100,8 +99,8 @@ class ClusterConfig:
 class WorkloadResult:
     name: str
 
-    cpu_utilization_percent: Optional[float]
-    memory_utilization_percent: Optional[float]
+    cpu_utilization_percent: float | None
+    memory_utilization_percent: float | None
 
     current_replicas: int
 
@@ -119,6 +118,7 @@ class WorkloadResult:
     @property
     def hpa_saturated(self) -> bool:
         return self.raw_desired_replicas != self.desired_replicas
+
 
 @dataclass(frozen=True)
 class PoolScenarioResult:
@@ -153,8 +153,8 @@ class PoolScenarioResult:
 
     # Per-node density of the tightest pod shape in this scenario, and the
     # resource that produces it. Explains a fragmentation verdict.
-    pods_per_node: Optional[int]
-    fragmentation_resource: Optional[str]
+    pods_per_node: int | None
+    fragmentation_resource: str | None
 
     @property
     def stranded_cpu_m(self) -> int:
@@ -229,18 +229,15 @@ class ClusterResult:
     scenarios: dict[str, ScenarioResult]
 
 
-
 # CONFIG OPERATIONS
 # -----------------
 def add_workload(
     cluster: ClusterConfig,
     workload: Workload,
-    ) -> ClusterConfig:
+) -> ClusterConfig:
 
     if workload.name in cluster.workloads:
-        raise ValueError(
-            f"Workload {workload.name!r} already exists"
-        )
+        raise ValueError(f"Workload {workload.name!r} already exists")
 
     return replace(
         cluster,
@@ -250,10 +247,11 @@ def add_workload(
         },
     )
 
+
 def remove_workload(
     cluster: ClusterConfig,
     workload_name: str,
-    ) -> ClusterConfig:
+) -> ClusterConfig:
 
     workloads = dict(cluster.workloads)
 
@@ -264,11 +262,12 @@ def remove_workload(
         workloads=workloads,
     )
 
+
 def update_workload(
     cluster: ClusterConfig,
     workload_name: str,
     workload: Workload,
-    ) -> ClusterConfig:
+) -> ClusterConfig:
 
     return replace(
         cluster,
@@ -278,11 +277,12 @@ def update_workload(
         },
     )
 
+
 def update_current_replicas(
     cluster: ClusterConfig,
     workload_name: str,
     current_replicas: int,
-    ) -> ClusterConfig:
+) -> ClusterConfig:
     workload = cluster.workloads[workload_name]
 
     return update_workload(
@@ -294,11 +294,12 @@ def update_current_replicas(
         ),
     )
 
+
 def update_rollout_max_surge(
     cluster: ClusterConfig,
     workload_name: str,
     max_surge_percent: float,
-    ) -> ClusterConfig:
+) -> ClusterConfig:
     workload = cluster.workloads[workload_name]
 
     return update_workload(
@@ -318,8 +319,8 @@ def update_cpu_request(
     cluster: ClusterConfig,
     workload_name: str,
     cpu_request_m: int,
-    ) -> ClusterConfig:
-    
+) -> ClusterConfig:
+
     workload = cluster.workloads[workload_name]
 
     updated_resources = replace(
@@ -331,18 +332,19 @@ def update_cpu_request(
         workload,
         resources=updated_resources,
     )
-    
+
     return update_workload(
         cluster,
         workload_name,
         updated_workload,
     )
 
+
 def update_memory_request(
     cluster: ClusterConfig,
     workload_name: str,
     memory_request_mib: int,
-    ) -> ClusterConfig:
+) -> ClusterConfig:
 
     workload = cluster.workloads[workload_name]
 
@@ -360,11 +362,12 @@ def update_memory_request(
         updated_workload,
     )
 
+
 def update_cpu_limit(
     cluster: ClusterConfig,
     workload_name: str,
-    cpu_limit_m: Optional[int],
-    ) -> ClusterConfig:
+    cpu_limit_m: int | None,
+) -> ClusterConfig:
 
     workload = cluster.workloads[workload_name]
 
@@ -382,11 +385,12 @@ def update_cpu_limit(
         updated_workload,
     )
 
+
 def update_memory_limit(
     cluster: ClusterConfig,
     workload_name: str,
-    memory_limit_mib: Optional[int],
-    ) -> ClusterConfig:
+    memory_limit_mib: int | None,
+) -> ClusterConfig:
 
     workload = cluster.workloads[workload_name]
 
@@ -404,19 +408,19 @@ def update_memory_limit(
         updated_workload,
     )
 
+
 def _require_hpa(workload: Workload) -> HPA:
     if workload.hpa is None:
-        raise ValueError(
-            f"Workload {workload.name!r} does not have an HPA"
-        )
+        raise ValueError(f"Workload {workload.name!r} does not have an HPA")
 
     return workload.hpa
+
 
 def update_hpa_cpu_target(
     cluster: ClusterConfig,
     workload_name: str,
-    target_percentage: Optional[float],
-    ) -> ClusterConfig:
+    target_percentage: float | None,
+) -> ClusterConfig:
 
     workload = cluster.workloads[workload_name]
     hpa = _require_hpa(workload)
@@ -435,11 +439,12 @@ def update_hpa_cpu_target(
         updated_workload,
     )
 
+
 def update_hpa_memory_target(
     cluster: ClusterConfig,
     workload_name: str,
-    target_percentage: Optional[float],
-    ) -> ClusterConfig:
+    target_percentage: float | None,
+) -> ClusterConfig:
 
     workload = cluster.workloads[workload_name]
     hpa = _require_hpa(workload)
@@ -458,18 +463,17 @@ def update_hpa_memory_target(
         updated_workload,
     )
 
+
 def update_hpa_min(
     cluster: ClusterConfig,
     workload_name: str,
     min_replicas: int,
-    ) -> ClusterConfig:
+) -> ClusterConfig:
     workload = cluster.workloads[workload_name]
     hpa = _require_hpa(workload)
 
     if min_replicas > hpa.max_replicas:
-        raise ValueError(
-            "HPA min_replicas cannot exceed max_replicas"
-        )
+        raise ValueError("HPA min_replicas cannot exceed max_replicas")
 
     updated_workload = replace(
         workload,
@@ -485,18 +489,17 @@ def update_hpa_min(
         updated_workload,
     )
 
+
 def update_hpa_max(
     cluster: ClusterConfig,
     workload_name: str,
     max_replicas: int,
-    ) -> ClusterConfig:
+) -> ClusterConfig:
     workload = cluster.workloads[workload_name]
     hpa = _require_hpa(workload)
 
     if max_replicas < hpa.min_replicas:
-        raise ValueError(
-            "HPA max_replicas cannot be less than min_replicas"
-        )
+        raise ValueError("HPA max_replicas cannot be less than min_replicas")
 
     updated_workload = replace(
         workload,
@@ -529,11 +532,12 @@ def _update_node_pool(
         },
     )
 
+
 def update_machine_cpu(
-        cluster: ClusterConfig,
-        pool_name: str,
-        cpu_m: int,
-    ) -> ClusterConfig:
+    cluster: ClusterConfig,
+    pool_name: str,
+    cpu_m: int,
+) -> ClusterConfig:
 
     pool = cluster.node_pools[pool_name]
 
@@ -546,11 +550,12 @@ def update_machine_cpu(
         ),
     )
 
+
 def update_machine_memory(
     cluster: ClusterConfig,
     pool_name: str,
     memory_mib: int,
-    ) -> ClusterConfig:
+) -> ClusterConfig:
 
     pool = cluster.node_pools[pool_name]
 
@@ -563,17 +568,16 @@ def update_machine_memory(
         ),
     )
 
+
 def update_ca_max(
     cluster: ClusterConfig,
     pool_name: str,
     max_nodes: int,
-    ) -> ClusterConfig:
+) -> ClusterConfig:
     pool = cluster.node_pools[pool_name]
 
     if max_nodes < pool.min_nodes:
-        raise ValueError(
-            "CA max_nodes cannot be less than min_nodes"
-        )
+        raise ValueError("CA max_nodes cannot be less than min_nodes")
 
     return _update_node_pool(
         cluster,
@@ -595,9 +599,114 @@ def resolve_pool_name(cluster: ClusterConfig, workload: Workload) -> str:
     if len(cluster.node_pools) == 1:
         return next(iter(cluster.node_pools))
     raise ValueError(
-        f"{workload.name}: workload must name a node pool when multiple "
-        "pools exist"
+        f"{workload.name}: workload must name a node pool when multiple pools exist"
     )
+
+
+def _validate_machine(pool_name: str, machine: MachineSpec) -> None:
+    if machine.cpu_m <= 0:
+        raise ValueError(f"{pool_name}: machine CPU must be greater than zero")
+    if machine.memory_mib <= 0:
+        raise ValueError(f"{pool_name}: machine memory must be greater than zero")
+    if machine.reserved_cpu_m < 0:
+        raise ValueError(f"{pool_name}: reserved CPU cannot be negative")
+    if machine.reserved_cpu_m >= machine.cpu_m:
+        raise ValueError(f"{pool_name}: reserved CPU must be less than machine CPU")
+    if machine.reserved_memory_mib < 0:
+        raise ValueError(f"{pool_name}: reserved memory cannot be negative")
+    if machine.reserved_memory_mib >= machine.memory_mib:
+        raise ValueError(
+            f"{pool_name}: reserved memory must be less than machine memory"
+        )
+    if machine.max_pods <= 0:
+        raise ValueError(f"{pool_name}: max_pods must be greater than zero")
+
+
+def _validate_node_pool(pool_name: str, pool: NodePool) -> None:
+    if pool_name != pool.name:
+        raise ValueError(
+            f"Node pool key {pool_name!r} does not match pool.name {pool.name!r}"
+        )
+
+    _validate_machine(pool_name, pool.machine)
+
+    if not 0 <= pool.min_nodes <= pool.current_nodes <= pool.max_nodes:
+        raise ValueError(
+            f"{pool_name}: expected min_nodes <= current_nodes <= max_nodes"
+        )
+
+
+def _validate_resources(name: str, resources: Resources) -> None:
+    if resources.cpu_request_m <= 0:
+        raise ValueError(f"{name}: CPU request must be greater than zero")
+    if resources.memory_request_mib <= 0:
+        raise ValueError(f"{name}: memory request must be greater than zero")
+    if resources.cpu_limit_m is not None:
+        if resources.cpu_limit_m <= 0:
+            raise ValueError(f"{name}: CPU limit must be greater than zero")
+        if resources.cpu_limit_m < resources.cpu_request_m:
+            raise ValueError(f"{name}: CPU limit must be >= CPU request")
+    if resources.memory_limit_mib is not None:
+        if resources.memory_limit_mib <= 0:
+            raise ValueError(f"{name}: memory limit must be greater than zero")
+        if resources.memory_limit_mib < resources.memory_request_mib:
+            raise ValueError(f"{name}: memory limit must be >= memory request")
+
+
+def _validate_hpa(name: str, hpa: HPA) -> None:
+    if hpa.min_replicas < 0:
+        raise ValueError(f"{name}: HPA min cannot be negative")
+    if hpa.max_replicas < hpa.min_replicas:
+        raise ValueError(f"{name}: HPA max must be >= HPA min")
+    for target in (
+        hpa.cpu_target_percentage,
+        hpa.memory_target_percentage,
+    ):
+        if target is not None and target <= 0:
+            raise ValueError(f"{name}: HPA target must be > 0")
+
+
+def _validate_pool_assignment(
+    cluster: ClusterConfig,
+    name: str,
+    workload: Workload,
+) -> None:
+    if workload.pool is not None and workload.pool not in cluster.node_pools:
+        raise ValueError(f"{name}: unknown node pool {workload.pool!r}")
+    # Raises when the assignment is ambiguous (no pool named, several exist).
+    resolve_pool_name(cluster, workload)
+
+
+def _validate_workload(
+    cluster: ClusterConfig,
+    name: str,
+    workload: Workload,
+) -> None:
+    if name != workload.name:
+        raise ValueError(
+            f"Workload key {name!r} does not match workload.name {workload.name!r}"
+        )
+
+    _validate_resources(name, workload.resources)
+
+    if workload.current_replicas < 0:
+        raise ValueError(f"{name}: replicas cannot be negative")
+    if (
+        workload.observed_cpu_per_pod_m is not None
+        and workload.observed_cpu_per_pod_m < 0
+    ):
+        raise ValueError(f"{name}: observed CPU cannot be negative")
+    if (
+        workload.observed_memory_per_pod_mib is not None
+        and workload.observed_memory_per_pod_mib < 0
+    ):
+        raise ValueError(f"{name}: observed memory cannot be negative")
+    if workload.rollout.max_surge_percent < 0:
+        raise ValueError(f"{name}: rollout max surge cannot be negative")
+    if workload.hpa is not None:
+        _validate_hpa(name, workload.hpa)
+
+    _validate_pool_assignment(cluster, name, workload)
 
 
 def validate(cluster: ClusterConfig) -> None:
@@ -606,92 +715,10 @@ def validate(cluster: ClusterConfig) -> None:
         raise ValueError("At least one node pool is required")
 
     for pool_name, pool in cluster.node_pools.items():
-        if pool_name != pool.name:
-            raise ValueError(
-                f"Node pool key {pool_name!r} does not match pool.name "
-                f"{pool.name!r}"
-            )
-
-        machine = pool.machine
-        if machine.cpu_m <= 0:
-            raise ValueError(f"{pool_name}: machine CPU must be greater than zero")
-        if machine.memory_mib <= 0:
-            raise ValueError(f"{pool_name}: machine memory must be greater than zero")
-        if machine.reserved_cpu_m < 0:
-            raise ValueError(f"{pool_name}: reserved CPU cannot be negative")
-        if machine.reserved_cpu_m >= machine.cpu_m:
-            raise ValueError(f"{pool_name}: reserved CPU must be less than machine CPU")
-        if machine.reserved_memory_mib < 0:
-            raise ValueError(f"{pool_name}: reserved memory cannot be negative")
-        if machine.reserved_memory_mib >= machine.memory_mib:
-            raise ValueError(
-                f"{pool_name}: reserved memory must be less than machine memory"
-            )
-        if machine.max_pods <= 0:
-            raise ValueError(f"{pool_name}: max_pods must be greater than zero")
-        if not 0 <= pool.min_nodes <= pool.current_nodes <= pool.max_nodes:
-            raise ValueError(
-                f"{pool_name}: expected min_nodes <= current_nodes <= max_nodes"
-            )
+        _validate_node_pool(pool_name, pool)
 
     for name, workload in cluster.workloads.items():
-        if name != workload.name:
-            raise ValueError(
-                f"Workload key {name!r} does not match workload.name "
-                f"{workload.name!r}"
-            )
-
-        resources = workload.resources
-        if resources.cpu_request_m <= 0:
-            raise ValueError(f"{name}: CPU request must be greater than zero")
-        if resources.memory_request_mib <= 0:
-            raise ValueError(f"{name}: memory request must be greater than zero")
-        if resources.cpu_limit_m is not None:
-            if resources.cpu_limit_m <= 0:
-                raise ValueError(f"{name}: CPU limit must be greater than zero")
-            if resources.cpu_limit_m < resources.cpu_request_m:
-                raise ValueError(f"{name}: CPU limit must be >= CPU request")
-        if resources.memory_limit_mib is not None:
-            if resources.memory_limit_mib <= 0:
-                raise ValueError(f"{name}: memory limit must be greater than zero")
-            if resources.memory_limit_mib < resources.memory_request_mib:
-                raise ValueError(f"{name}: memory limit must be >= memory request")
-
-        if workload.current_replicas < 0:
-            raise ValueError(f"{name}: replicas cannot be negative")
-        if (
-            workload.observed_cpu_per_pod_m is not None
-            and workload.observed_cpu_per_pod_m < 0
-        ):
-            raise ValueError(f"{name}: observed CPU cannot be negative")
-        if (
-            workload.observed_memory_per_pod_mib is not None
-            and workload.observed_memory_per_pod_mib < 0
-        ):
-            raise ValueError(f"{name}: observed memory cannot be negative")
-        if workload.rollout.max_surge_percent < 0:
-            raise ValueError(f"{name}: rollout max surge cannot be negative")
-
-        if workload.hpa is not None:
-            hpa = workload.hpa
-            if hpa.min_replicas < 0:
-                raise ValueError(f"{name}: HPA min cannot be negative")
-            if hpa.max_replicas < hpa.min_replicas:
-                raise ValueError(f"{name}: HPA max must be >= HPA min")
-            for target in (
-                hpa.cpu_target_percentage,
-                hpa.memory_target_percentage,
-            ):
-                if target is not None and target <= 0:
-                    raise ValueError(f"{name}: HPA target must be > 0")
-
-        if (
-            workload.pool is not None
-            and workload.pool not in cluster.node_pools
-        ):
-            raise ValueError(f"{name}: unknown node pool {workload.pool!r}")
-        # Raises when the assignment is ambiguous (no pool named, several exist).
-        resolve_pool_name(cluster, workload)
+        _validate_workload(cluster, name, workload)
 
 
 def _validate_replicas(
@@ -727,12 +754,12 @@ def _metric_recommendation(
 
 def evaluate_hpa(
     workload: Workload,
-    ) -> tuple[
-        Optional[float],
-        Optional[float],
-        int,
-        int,
-        ]:
+) -> tuple[
+    float | None,
+    float | None,
+    int,
+    int,
+]:
     """
     Returns:
         cpu_utilization_percent
@@ -763,9 +790,7 @@ def evaluate_hpa(
         and workload.resources.cpu_request_m > 0
     ):
         cpu_utilization = (
-            workload.observed_cpu_per_pod_m
-            / workload.resources.cpu_request_m
-            * 100
+            workload.observed_cpu_per_pod_m / workload.resources.cpu_request_m * 100
         )
 
         desired_candidates.append(
@@ -797,9 +822,7 @@ def evaluate_hpa(
         )
 
     raw_desired_replicas = (
-        max(desired_candidates)
-        if desired_candidates
-        else workload.current_replicas
+        max(desired_candidates) if desired_candidates else workload.current_replicas
     )
 
     desired_replicas = max(
@@ -817,6 +840,7 @@ def evaluate_hpa(
         desired_replicas,
     )
 
+
 def evaluate_workload(workload: Workload) -> WorkloadResult:
     (
         cpu_utilization,
@@ -830,31 +854,21 @@ def evaluate_workload(workload: Workload) -> WorkloadResult:
     else:
         max_replicas = workload.hpa.max_replicas
 
-    surge = ceil(
-        max_replicas
-        * workload.rollout.max_surge_percent
-        / 100
-    )
+    surge = ceil(max_replicas * workload.rollout.max_surge_percent / 100)
 
-    rollout_replicas_at_max = (
-        max_replicas + surge
-    )
+    rollout_replicas_at_max = max_replicas + surge
 
     return WorkloadResult(
         name=workload.name,
-
         cpu_utilization_percent=cpu_utilization,
         memory_utilization_percent=memory_utilization,
-
         current_replicas=workload.current_replicas,
         raw_desired_replicas=raw_desired_replicas,
         desired_replicas=desired_replicas,
         max_replicas=max_replicas,
-
-        rollout_replicas_at_max=(
-            rollout_replicas_at_max
-        ),
+        rollout_replicas_at_max=(rollout_replicas_at_max),
     )
+
 
 def build_pods(
     cluster: ClusterConfig,
@@ -928,7 +942,7 @@ def _pack_pods(
 def _shape_density(
     machine: MachineSpec,
     pods: list[PodRequest],
-) -> tuple[Optional[int], Optional[str]]:
+) -> tuple[int | None, str | None]:
     """How many of the tightest pod fit on one node, and what limits it.
 
     Aggregate division hides the cost of pod shape: a pod requesting more than
@@ -1019,9 +1033,7 @@ def _evaluate_pool_scenario(
         cpu_requested_m=cpu_requested_m,
         memory_requested_mib=memory_requested_mib,
         capacity_cpu_m=effective_nodes_required * machine.allocatable_cpu_m,
-        capacity_memory_mib=(
-            effective_nodes_required * machine.allocatable_memory_mib
-        ),
+        capacity_memory_mib=(effective_nodes_required * machine.allocatable_memory_mib),
         nodes_required=nodes_required,
         effective_nodes_required=effective_nodes_required,
         current_nodes=pool.current_nodes,
@@ -1072,15 +1084,14 @@ def evaluate_scenario(
         ),
         current_nodes=sum(result.current_nodes for result in pool_results.values()),
         nodes_to_add=sum(result.nodes_to_add for result in pool_results.values()),
-        nodes_to_remove=sum(
-            result.nodes_to_remove for result in pool_results.values()
-        ),
+        nodes_to_remove=sum(result.nodes_to_remove for result in pool_results.values()),
         schedulable=all(result.schedulable for result in pool_results.values()),
         oversized_pod_count=sum(
             result.oversized_pod_count for result in pool_results.values()
         ),
         pools=pool_results,
     )
+
 
 def min_replicas_for(
     workload: Workload,
@@ -1090,44 +1101,34 @@ def min_replicas_for(
 
     return workload.hpa.min_replicas
 
+
 def evaluate(cluster: ClusterConfig) -> ClusterResult:
     validate(cluster)
 
     workload_results = {
         name: evaluate_workload(workload)
-        for name, workload
-        in cluster.workloads.items()
+        for name, workload in cluster.workloads.items()
     }
 
     current_replicas = {
-        name: result.current_replicas
-        for name, result
-        in workload_results.items()
+        name: result.current_replicas for name, result in workload_results.items()
     }
 
     desired_replicas = {
-        name: result.desired_replicas
-        for name, result
-        in workload_results.items()
+        name: result.desired_replicas for name, result in workload_results.items()
     }
 
     max_replicas = {
-        name: result.max_replicas
-        for name, result
-        in workload_results.items()
+        name: result.max_replicas for name, result in workload_results.items()
     }
 
     rollout_replicas = {
         name: result.rollout_replicas_at_max
-        for name, result
-        in workload_results.items()
+        for name, result in workload_results.items()
     }
 
     min_replicas = {
-        name: min_replicas_for(
-            cluster.workloads[name]
-        )
-        for name in workload_results
+        name: min_replicas_for(cluster.workloads[name]) for name in workload_results
     }
 
     scenarios = {
@@ -1136,25 +1137,21 @@ def evaluate(cluster: ClusterConfig) -> ClusterResult:
             cluster,
             min_replicas,
         ),
-
         "current": evaluate_scenario(
             "current",
             cluster,
             current_replicas,
         ),
-
         "hpa_desired": evaluate_scenario(
             "hpa_desired",
             cluster,
             desired_replicas,
         ),
-
         "hpa_max": evaluate_scenario(
             "hpa_max",
             cluster,
             max_replicas,
         ),
-
         "hpa_max_rollout": evaluate_scenario(
             "hpa_max_rollout",
             cluster,
@@ -1189,6 +1186,7 @@ class ConfigValueChange:
 @dataclass(frozen=True)
 class ConfigDiff:
     """Configuration changes, separate from their calculated impact."""
+
     changes: dict[str, ConfigValueChange]
     workloads_added: tuple[str, ...]
     workloads_removed: tuple[str, ...]
@@ -1212,6 +1210,7 @@ class ScenarioDiff:
     and are not diffed here; a pool can appear or vanish between the two
     configurations, which a flat before/after pair cannot express.
     """
+
     pod_count: ValueChange
     cpu_requested_m: ValueChange
     memory_requested_mib: ValueChange

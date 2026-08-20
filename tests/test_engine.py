@@ -3,8 +3,8 @@ from dataclasses import replace
 import pytest
 
 from kcap.engine import (
-    ClusterConfig,
     HPA,
+    ClusterConfig,
     MachineSpec,
     NodePool,
     Resources,
@@ -231,10 +231,212 @@ class TestScheduling:
 
 
 class TestValidation:
-    def test_evaluate_validates_cluster(self) -> None:
+    @pytest.mark.parametrize(
+        ("machine", "message"),
+        [
+            (
+                MachineSpec(cpu_m=0, memory_mib=8192),
+                "default: machine CPU must be greater than zero",
+            ),
+            (
+                MachineSpec(cpu_m=4000, memory_mib=0),
+                "default: machine memory must be greater than zero",
+            ),
+            (
+                MachineSpec(cpu_m=4000, memory_mib=8192, reserved_cpu_m=-1),
+                "default: reserved CPU cannot be negative",
+            ),
+            (
+                MachineSpec(cpu_m=4000, memory_mib=8192, reserved_cpu_m=4000),
+                "default: reserved CPU must be less than machine CPU",
+            ),
+            (
+                MachineSpec(cpu_m=4000, memory_mib=8192, reserved_memory_mib=-1),
+                "default: reserved memory cannot be negative",
+            ),
+            (
+                MachineSpec(cpu_m=4000, memory_mib=8192, reserved_memory_mib=8192),
+                "default: reserved memory must be less than machine memory",
+            ),
+            (
+                MachineSpec(cpu_m=4000, memory_mib=8192, max_pods=0),
+                "default: max_pods must be greater than zero",
+            ),
+        ],
+    )
+    def test_rejects_invalid_machine_fields(
+        self,
+        machine: MachineSpec,
+        message: str,
+    ) -> None:
         cluster = cluster_with(
-            Workload("api", Resources(-1, 128), current_replicas=1)
+            Workload("api", Resources(100, 128), current_replicas=1),
+            machine=machine,
         )
+
+        with pytest.raises(ValueError) as error:
+            validate(cluster)
+
+        assert str(error.value) == message
+
+    @pytest.mark.parametrize(
+        ("workload", "message"),
+        [
+            (
+                Workload("api", Resources(0, 128), current_replicas=1),
+                "api: CPU request must be greater than zero",
+            ),
+            (
+                Workload("api", Resources(100, 0), current_replicas=1),
+                "api: memory request must be greater than zero",
+            ),
+            (
+                Workload(
+                    "api",
+                    Resources(100, 128, cpu_limit_m=0),
+                    current_replicas=1,
+                ),
+                "api: CPU limit must be greater than zero",
+            ),
+            (
+                Workload(
+                    "api",
+                    Resources(100, 128, cpu_limit_m=50),
+                    current_replicas=1,
+                ),
+                "api: CPU limit must be >= CPU request",
+            ),
+            (
+                Workload(
+                    "api",
+                    Resources(100, 128, memory_limit_mib=0),
+                    current_replicas=1,
+                ),
+                "api: memory limit must be greater than zero",
+            ),
+            (
+                Workload(
+                    "api",
+                    Resources(100, 128, memory_limit_mib=64),
+                    current_replicas=1,
+                ),
+                "api: memory limit must be >= memory request",
+            ),
+            (
+                Workload("api", Resources(100, 128), current_replicas=-1),
+                "api: replicas cannot be negative",
+            ),
+            (
+                Workload(
+                    "api",
+                    Resources(100, 128),
+                    current_replicas=1,
+                    observed_cpu_per_pod_m=-1,
+                ),
+                "api: observed CPU cannot be negative",
+            ),
+            (
+                Workload(
+                    "api",
+                    Resources(100, 128),
+                    current_replicas=1,
+                    observed_memory_per_pod_mib=-1,
+                ),
+                "api: observed memory cannot be negative",
+            ),
+            (
+                Workload(
+                    "api",
+                    Resources(100, 128),
+                    current_replicas=1,
+                    rollout=Rollout(max_surge_percent=-1),
+                ),
+                "api: rollout max surge cannot be negative",
+            ),
+            (
+                Workload(
+                    "api",
+                    Resources(100, 128),
+                    current_replicas=1,
+                    hpa=HPA(-1, 2),
+                ),
+                "api: HPA min cannot be negative",
+            ),
+            (
+                Workload(
+                    "api",
+                    Resources(100, 128),
+                    current_replicas=1,
+                    hpa=HPA(2, 1),
+                ),
+                "api: HPA max must be >= HPA min",
+            ),
+            (
+                Workload(
+                    "api",
+                    Resources(100, 128),
+                    current_replicas=1,
+                    hpa=HPA(1, 2, cpu_target_percentage=0),
+                ),
+                "api: HPA target must be > 0",
+            ),
+            (
+                Workload(
+                    "api",
+                    Resources(100, 128),
+                    current_replicas=1,
+                    hpa=HPA(1, 2, memory_target_percentage=0),
+                ),
+                "api: HPA target must be > 0",
+            ),
+        ],
+    )
+    def test_rejects_invalid_workload_fields(
+        self,
+        workload: Workload,
+        message: str,
+    ) -> None:
+        with pytest.raises(ValueError) as error:
+            validate(cluster_with(workload))
+
+        assert str(error.value) == message
+
+    def test_rejects_empty_node_pools(self) -> None:
+        cluster = ClusterConfig(workloads={}, node_pools={})
+
+        with pytest.raises(ValueError, match="At least one node pool"):
+            validate(cluster)
+
+    def test_rejects_node_pool_key_name_mismatch(self) -> None:
+        cluster = cluster_with(Workload("api", Resources(100, 128), current_replicas=1))
+        cluster = replace(
+            cluster,
+            node_pools={"other": cluster.node_pools["default"]},
+        )
+
+        with pytest.raises(ValueError) as error:
+            validate(cluster)
+
+        assert str(error.value) == (
+            "Node pool key 'other' does not match pool.name 'default'"
+        )
+
+    def test_rejects_workload_key_name_mismatch(self) -> None:
+        cluster = cluster_with(Workload("api", Resources(100, 128), current_replicas=1))
+        cluster = replace(
+            cluster,
+            workloads={"other": cluster.workloads["api"]},
+        )
+
+        with pytest.raises(ValueError) as error:
+            validate(cluster)
+
+        assert str(error.value) == (
+            "Workload key 'other' does not match workload.name 'api'"
+        )
+
+    def test_evaluate_validates_cluster(self) -> None:
+        cluster = cluster_with(Workload("api", Resources(-1, 128), current_replicas=1))
 
         with pytest.raises(ValueError, match="CPU request"):
             evaluate(cluster)
@@ -510,7 +712,9 @@ class TestMultiPool:
         assert highmem.pod_count == 4
         assert highmem.nodes_required == 2
         assert scenario.pod_count == 7
-        assert scenario.nodes_required == general.nodes_required + highmem.nodes_required
+        assert (
+            scenario.nodes_required == general.nodes_required + highmem.nodes_required
+        )
         assert scenario.effective_nodes_required == (
             general.effective_nodes_required + highmem.effective_nodes_required
         )
@@ -560,9 +764,7 @@ class TestMultiPool:
             validate(cluster)
 
     def test_unset_pool_resolves_to_the_sole_pool(self) -> None:
-        cluster = cluster_with(
-            Workload("api", Resources(100, 128), current_replicas=2)
-        )
+        cluster = cluster_with(Workload("api", Resources(100, 128), current_replicas=2))
 
         scenario = evaluate(cluster).scenarios["current"]
 

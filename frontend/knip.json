@@ -1,0 +1,15 @@
+{
+  "$schema": "./node_modules/knip/schema.json",
+  "ignoreBinaries": ["habit-hooks"],
+  "ignore": ["src/generated/**"],
+  "ignoreExportsUsedInFile": true,
+  "entry": [
+    "src/main.tsx!",
+    "src/**/*.test.ts",
+    "vite.config.ts"
+  ],
+  "project": ["src/**/*.ts!", "src/**/*.tsx!", "vite.config.ts"],
+  "ignoreDependencies": [
+    "ts-morph"
+  ]
+}

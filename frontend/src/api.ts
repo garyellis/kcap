@@ -1,136 +1,47 @@
-export type Resources = {
-  cpu_request_m: number
-  memory_request_mib: number
-  cpu_limit_m: number | null
-  memory_limit_mib: number | null
-}
+import type {
+  ClusterConfigSchema,
+  ClusterResultSchema,
+  CompareResponse as ApiCompareResponse,
+  HpaSchema,
+  MachineSpecSchema,
+  NodePoolSchema,
+  PoolScenarioResultSchema,
+  ResourcesSchema,
+  RolloutSchema,
+  WorkloadResultSchema,
+  WorkloadSchema,
+} from './generated'
 
-export type Hpa = {
-  min_replicas: number
-  max_replicas: number
-  cpu_target_percentage: number | null
-  memory_target_percentage: number | null
-}
+type WithDefaults<T, K extends keyof T> = Omit<T, K> & Required<Pick<T, K>>
 
-export type Workload = {
-  name: string
+export type Resources = WithDefaults<ResourcesSchema, 'cpu_limit_m' | 'memory_limit_mib'>
+export type Hpa = WithDefaults<HpaSchema, 'cpu_target_percentage' | 'memory_target_percentage'>
+type MachineSpec = WithDefaults<
+  MachineSpecSchema,
+  'max_pods' | 'reserved_cpu_m' | 'reserved_memory_mib'
+>
+type Rollout = WithDefaults<RolloutSchema, 'max_surge_percent'>
+type WorkloadWithDefaults = WithDefaults<
+  WorkloadSchema,
+  'hpa' | 'observed_cpu_per_pod_m' | 'observed_memory_per_pod_mib' | 'pool' | 'rollout'
+>
+
+export type Workload = Omit<WorkloadWithDefaults, 'hpa' | 'resources' | 'rollout'> & {
   resources: Resources
-  current_replicas: number
-  observed_cpu_per_pod_m: number | null
-  observed_memory_per_pod_mib: number | null
   hpa: Hpa | null
-  rollout: { max_surge_percent: number }
-  pool: string | null
+  rollout: Rollout
 }
 
-export type NodePool = {
-  name: string
-  machine: {
-    cpu_m: number
-    memory_mib: number
-    reserved_cpu_m: number
-    reserved_memory_mib: number
-    max_pods: number
-  }
-  min_nodes: number
-  current_nodes: number
-  max_nodes: number
-}
-
-export type ClusterConfig = {
+export type NodePool = Omit<NodePoolSchema, 'machine'> & { machine: MachineSpec }
+export type ClusterConfig = Omit<ClusterConfigSchema, 'node_pools' | 'workloads'> & {
   workloads: Record<string, Workload>
   node_pools: Record<string, NodePool>
 }
 
-export type WorkloadResult = {
-  name: string
-  cpu_utilization_percent: number | null
-  memory_utilization_percent: number | null
-  current_replicas: number
-  raw_desired_replicas: number
-  desired_replicas: number
-  hpa_saturated: boolean
-  max_replicas: number
-  rollout_replicas_at_max: number
-}
-
-export type PoolScenarioResult = {
-  pool: string
-  pod_count: number
-  cpu_requested_m: number
-  memory_requested_mib: number
-  capacity_cpu_m: number
-  capacity_memory_mib: number
-  stranded_cpu_m: number
-  stranded_memory_mib: number
-  nodes_required: number
-  effective_nodes_required: number
-  current_nodes: number
-  nodes_to_add: number
-  nodes_to_remove: number
-  node_headroom: number
-  limiting_resource: string
-  schedulable: boolean
-  oversized_pod_count: number
-  pods_per_node: number | null
-  fragmentation_resource: string | null
-}
-
-export type ScenarioResult = {
-  name: string
-  replicas: Record<string, number>
-  pod_count: number
-  cpu_requested_m: number
-  memory_requested_mib: number
-  nodes_required: number
-  effective_nodes_required: number
-  current_nodes: number
-  nodes_to_add: number
-  nodes_to_remove: number
-  schedulable: boolean
-  oversized_pod_count: number
-  pools: Record<string, PoolScenarioResult>
-}
-
-export type ClusterResult = {
-  workloads: Record<string, WorkloadResult>
-  scenarios: Record<string, ScenarioResult>
-}
-
-export type ValueChange = {
-  before: number
-  after: number
-  delta: number
-}
-
-export type ScenarioDiff = {
-  pod_count: ValueChange
-  cpu_requested_m: ValueChange
-  memory_requested_mib: ValueChange
-  nodes_required: ValueChange
-  effective_nodes_required: ValueChange
-  current_nodes: ValueChange
-  nodes_to_add: ValueChange
-  nodes_to_remove: ValueChange
-  schedulable_before: boolean
-  schedulable_after: boolean
-}
-
-export type CompareResponse = {
-  baseline_result: ClusterResult
-  candidate_result: ClusterResult
-  configuration_diff: {
-    changes: Record<string, { before: unknown; after: unknown }>
-    workloads_added: string[]
-    workloads_removed: string[]
-    node_pools_added: string[]
-    node_pools_removed: string[]
-  }
-  impact_diff: {
-    workloads: Record<string, Record<string, ValueChange>>
-    scenarios: Record<string, ScenarioDiff>
-  }
-}
+export type WorkloadResult = WorkloadResultSchema
+export type PoolScenarioResult = PoolScenarioResultSchema
+export type ClusterResult = ClusterResultSchema
+export type CompareResponse = ApiCompareResponse
 
 const API_BASE = import.meta.env.VITE_API_BASE_URL ?? ''
 
