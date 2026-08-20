@@ -260,27 +260,78 @@ export function effectiveRequest(
 
 // null renders as the limit toggle switched off. Any container without the
 // limit leaves the pod unbounded at runtime, so partial limits are null too.
-function summedLimit(containers: ExportedContainer[], resource: 'cpu' | 'memory'): number | null {
+// The container set matches effectiveRequest — regular containers plus native
+// sidecars — so a Guaranteed pod with a sidecar cannot import with its request
+// (which counts the sidecar) above its limit (which used to skip it), and it
+// takes the same max with plain init containers that effectiveRequest takes.
+function summedLimit(
+  containers: ExportedContainer[],
+  initContainers: ExportedContainer[],
+  resource: 'cpu' | 'memory',
+): number | null {
+  const parse = resource === 'cpu' ? parseCpuQuantity : parseMemoryQuantity
   let total = 0
+  let initMax = 0
   for (const container of containers) {
-    const raw = container.resources?.limits?.[resource]
-    const parsed = resource === 'cpu' ? parseCpuQuantity(raw) : parseMemoryQuantity(raw)
+    const parsed = parse(container.resources?.limits?.[resource])
     if (parsed <= 0) return null
     total += parsed
   }
-  return total > 0 ? total : null
+  for (const container of initContainers) {
+    const parsed = parse(container.resources?.limits?.[resource])
+    if (container.restartPolicy === 'Always') {
+      if (parsed <= 0) return null
+      total += parsed
+      continue
+    }
+    // A plain init container counts toward the pod limit exactly as far as it
+    // counts toward the pod request, because a limit below the request imported
+    // beside it is incoherent (the engine rejects the pair). So a declared
+    // limit joins the max; a declared request with no limit is a genuinely
+    // unbounded phase and nulls the limit; declaring neither leaves the pod's
+    // limits alone, since such a container cannot dominate the request either.
+    if (parsed > 0) initMax = Math.max(initMax, parsed)
+    else if (containerRequest(container, resource) > 0) return null
+  }
+  const limit = Math.max(total, initMax)
+  return limit > 0 ? limit : null
 }
 
-export function maxSurgePercent(kind: string, maxSurge: string | number | null | undefined, replicas: number): number {
-  if (kind === 'StatefulSet') return 0
-  if (maxSurge === null || maxSurge === undefined || maxSurge === '') return 25
+// The Kubernetes default for an unset RollingUpdate maxSurge.
+const DEFAULT_MAX_SURGE_PERCENT = 25
+
+export type ImportedRollout = { max_surge_percent: number; max_surge_pods: number | null }
+
+// Kubernetes never rescales an absolute maxSurge, so neither does kcap.
+// Verified at kubernetes/kubernetes v1.33.0:
+//   pkg/controller/deployment/util/deployment_util.go — MaxSurge() calls
+//   ResolveFenceposts(), which calls
+//   intstrutil.GetScaledValueFromIntOrPercent(maxSurge, int(desired), true);
+//   staging/src/k8s.io/apimachinery/pkg/util/intstr/intstr.go — that function
+//   returns an Int value unscaled, and only scales a "N%" string
+//   (value * total / 100, rounded up).
+// So an integer maxSurge imports as an absolute pod count (max_surge_pods) and a
+// percent string imports as a percentage (max_surge_percent). Scaling the
+// absolute against replicas here used to inflate it, because kcap applies the
+// percentage at the HPA maximum rather than at the workload's current replicas.
+export function rolloutFromMaxSurge(kind: string, maxSurge: string | number | null | undefined): ImportedRollout {
+  // A StatefulSet RollingUpdate replaces pods in place — no surge. kcap keeps
+  // expressing that as 0%, with max_surge_pods left null, so the workload still
+  // imports in the UI's percent mode and existing scenario files are unchanged.
+  if (kind === 'StatefulSet') return { max_surge_percent: 0, max_surge_pods: null }
+  const fallback: ImportedRollout = { max_surge_percent: DEFAULT_MAX_SURGE_PERCENT, max_surge_pods: null }
+  if (maxSurge === null || maxSurge === undefined || maxSurge === '') return fallback
   if (typeof maxSurge === 'string' && maxSurge.endsWith('%')) {
     const percent = Number(maxSurge.slice(0, -1))
-    return Number.isFinite(percent) ? percent : 25
+    // Negative and non-numeric percentages are not valid Kubernetes values and
+    // the schema rejects them (ge=0), so they fall back to the default.
+    return Number.isFinite(percent) && percent >= 0 ? { max_surge_percent: percent, max_surge_pods: null } : fallback
   }
   const absolute = Number(maxSurge)
-  if (!Number.isFinite(absolute)) return 25
-  return Math.round((100 * absolute) / Math.max(1, replicas))
+  if (!Number.isFinite(absolute) || absolute < 0) return fallback
+  // The percentage stays at its default and inert: max_surge_pods takes
+  // precedence in the engine, including at 0.
+  return { max_surge_percent: DEFAULT_MAX_SURGE_PERCENT, max_surge_pods: Math.round(absolute) }
 }
 
 // Sum container usage per pod, then average across the running pods the
@@ -345,6 +396,20 @@ function isExportedHpa(item: ExportedWorkload | ExportedHpa): item is ExportedHp
   return item.kind === 'HorizontalPodAutoscaler'
 }
 
+// namespace/name is unique per kind, not per namespace, so a Deployment and a
+// StatefulSet of the same name would silently overwrite each other. Colliding
+// names get the kind appended; every other key stays as it was, which keeps
+// existing configs and the carry-forward lookup working.
+function kindsByWorkloadKey(items: Array<ExportedWorkload | ExportedHpa>): Map<string, string[]> {
+  const kinds = new Map<string, string[]>()
+  for (const item of items) {
+    if (isExportedHpa(item)) continue
+    const key = `${item.namespace}/${item.name}`
+    kinds.set(key, [...(kinds.get(key) ?? []), item.kind])
+  }
+  return kinds
+}
+
 function toHpa(hpa: ExportedHpa): Hpa {
   let cpu: number | null = null
   let memory: number | null = null
@@ -384,9 +449,20 @@ export function transformClusterExport(
   }
   const matchedHpas = new Set<ExportedHpa>()
 
+  const kindsByKey = kindsByWorkloadKey(data.workloads)
+  const collidingKeys = new Set<string>()
+  for (const [key, kinds] of kindsByKey) {
+    if (kinds.length < 2) continue
+    collidingKeys.add(key)
+    warnings.push(
+      `${key} exists as ${kinds.join(' and ')} — imported as separate workloads with the kind appended.`,
+    )
+  }
+
   for (const item of data.workloads) {
     if (isExportedHpa(item)) continue
-    const key = `${item.namespace}/${item.name}`
+    const name = `${item.namespace}/${item.name}`
+    const key = collidingKeys.has(name) ? `${name} (${item.kind.toLowerCase()})` : name
     const containers = item.containers ?? []
     const initContainers = item.initContainers ?? []
     // Request fallback chain, most real first: the export (requests, or limits
@@ -420,14 +496,14 @@ export function transformClusterExport(
       resources: {
         cpu_request_m: cpu,
         memory_request_mib: memory,
-        cpu_limit_m: summedLimit(containers, 'cpu'),
-        memory_limit_mib: summedLimit(containers, 'memory'),
+        cpu_limit_m: summedLimit(containers, initContainers, 'cpu'),
+        memory_limit_mib: summedLimit(containers, initContainers, 'memory'),
       },
       current_replicas: replicas,
       observed_cpu_per_pod_m: observed?.cpu_m ?? null,
       observed_memory_per_pod_mib: observed?.memory_mib ?? null,
       hpa: hpa ? toHpa(hpa) : null,
-      rollout: { max_surge_percent: maxSurgePercent(item.kind, item.maxSurge, replicas) },
+      rollout: rolloutFromMaxSurge(item.kind, item.maxSurge),
       pool: null,
     }
     const selector = item.nodeSelector && Object.keys(item.nodeSelector).length > 0 ? item.nodeSelector : null

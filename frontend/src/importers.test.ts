@@ -10,16 +10,19 @@ import {
   buildExportScript,
   deriveNodePools,
   effectiveRequest,
-  maxSurgePercent,
   parseCpuQuantity,
   parseImport,
   parseMemoryQuantity,
   planClusterImport,
+  rolloutFromMaxSurge,
   selectorKey,
   serializeScenario,
   transformClusterExport,
 } from './importers'
-import type { ClusterExport, ExportedNode, ExportedUsage, ExportedWorkload } from './importers'
+import type { ClusterExport, ExportedContainer, ExportedNode, ExportedUsage, ExportedWorkload } from './importers'
+// The surge unit the UI derives is real, shared code — importing it here keeps
+// these save/load and import assertions pinned to what the editor actually does.
+import { surgeUnitOf } from './surge'
 
 function config(overrides: Partial<ClusterConfig> = {}): ClusterConfig {
   return {
@@ -154,16 +157,59 @@ describe('effectiveRequest', () => {
   })
 })
 
-describe('maxSurgePercent', () => {
-  it('passes percentages through and converts absolutes', () => {
-    expect(maxSurgePercent('Deployment', '25%', 4)).toBe(25)
-    expect(maxSurgePercent('Deployment', 1, 4)).toBe(25)
-    expect(maxSurgePercent('Deployment', '2', 3)).toBe(67)
+// Behavioral authority, verified at kubernetes/kubernetes v1.33.0:
+// pkg/controller/deployment/util/deployment_util.go MaxSurge() → ResolveFenceposts()
+// → intstr.GetScaledValueFromIntOrPercent(maxSurge, int(desired), true) in
+// staging/src/k8s.io/apimachinery/pkg/util/intstr/intstr.go, where an Int value is
+// returned unscaled and only a "N%" string is scaled (value * total / 100, rounded
+// up). An absolute maxSurge therefore stays absolute on import.
+describe('rolloutFromMaxSurge', () => {
+  it('keeps percentages as percentages, with no absolute', () => {
+    expect(rolloutFromMaxSurge('Deployment', '25%')).toEqual({ max_surge_percent: 25, max_surge_pods: null })
+    expect(rolloutFromMaxSurge('Deployment', '50%')).toEqual({ max_surge_percent: 50, max_surge_pods: null })
   })
 
-  it('defaults missing to 25 and StatefulSets to 0', () => {
-    expect(maxSurgePercent('Deployment', null, 4)).toBe(25)
-    expect(maxSurgePercent('StatefulSet', '50%', 4)).toBe(0)
+  it('keeps absolutes absolute, leaving the percentage at its inert default', () => {
+    expect(rolloutFromMaxSurge('Deployment', 1)).toEqual({ max_surge_percent: 25, max_surge_pods: 1 })
+    expect(rolloutFromMaxSurge('Deployment', '2')).toEqual({ max_surge_percent: 25, max_surge_pods: 2 })
+    // 0 is a real Kubernetes maxSurge and must survive as an absolute, since the
+    // engine gives max_surge_pods precedence even at 0.
+    expect(rolloutFromMaxSurge('Deployment', 0)).toEqual({ max_surge_percent: 25, max_surge_pods: 0 })
+  })
+
+  it('defaults missing to 25% and gives StatefulSets no surge', () => {
+    expect(rolloutFromMaxSurge('Deployment', null)).toEqual({ max_surge_percent: 25, max_surge_pods: null })
+    expect(rolloutFromMaxSurge('Deployment', undefined)).toEqual({ max_surge_percent: 25, max_surge_pods: null })
+    expect(rolloutFromMaxSurge('Deployment', '')).toEqual({ max_surge_percent: 25, max_surge_pods: null })
+    expect(rolloutFromMaxSurge('StatefulSet', '50%')).toEqual({ max_surge_percent: 0, max_surge_pods: null })
+    expect(rolloutFromMaxSurge('StatefulSet', 3)).toEqual({ max_surge_percent: 0, max_surge_pods: null })
+  })
+
+  it('falls back to the default for values the schema would reject', () => {
+    // max_surge_pods and max_surge_percent are both ge=0 on the API, so a
+    // negative or unparseable value must never be emitted.
+    expect(rolloutFromMaxSurge('Deployment', -1)).toEqual({ max_surge_percent: 25, max_surge_pods: null })
+    expect(rolloutFromMaxSurge('Deployment', '-10%')).toEqual({ max_surge_percent: 25, max_surge_pods: null })
+    expect(rolloutFromMaxSurge('Deployment', 'lots')).toEqual({ max_surge_percent: 25, max_surge_pods: null })
+    expect(rolloutFromMaxSurge('Deployment', 'many%')).toEqual({ max_surge_percent: 25, max_surge_pods: null })
+  })
+
+  it('does not scale an absolute by the replica count', () => {
+    // The old bug converted an absolute into a percentage of current replicas,
+    // which the engine then applied at max_replicas: maxSurge 1 at 2 replicas
+    // became 50%, i.e. 10 surge pods at an HPA maximum of 20.
+    for (const replicas of [2, 40]) {
+      const workload = deployment({ maxSurge: 1, replicas })
+      const imported = transformClusterExport(clusterExport([workload])).workloads['demo/web']
+      expect(imported.current_replicas).toBe(replicas)
+      expect(imported.rollout).toEqual({ max_surge_percent: 25, max_surge_pods: 1 })
+    }
+  })
+
+  it('leaves a workload with no maxSurge exactly as existing scenario files have it', () => {
+    const workload = deployment({ maxSurge: null })
+    const imported = transformClusterExport(clusterExport([workload])).workloads['demo/web']
+    expect(imported.rollout).toEqual({ max_surge_percent: 25, max_surge_pods: null })
   })
 })
 
@@ -189,6 +235,169 @@ describe('transformClusterExport', () => {
     const workload = transformClusterExport(clusterExport([item])).workloads['demo/web']
     expect(workload.resources.cpu_limit_m).toBe(400)
     expect(workload.resources.memory_limit_mib).toBeNull()
+  })
+
+  // A Guaranteed pod with a native sidecar (restartPolicy Always): the sidecar
+  // keeps running, so it counts into the effective request. The pod limit has
+  // to count it too, or the import lands with request > limit and the engine
+  // rejects the config with a 422 the import dialog cannot fix.
+  const guaranteedWithSidecar = (sidecar: ExportedContainer) =>
+    deployment({
+      containers: [{ resources: { requests: { cpu: '250m', memory: '256Mi' }, limits: { cpu: '250m', memory: '256Mi' } } }],
+      initContainers: [sidecar],
+    })
+
+  it('counts native sidecar limits into the pod limit', () => {
+    const item = guaranteedWithSidecar({
+      resources: { requests: { cpu: '50m', memory: '64Mi' }, limits: { cpu: '50m', memory: '64Mi' } },
+      restartPolicy: 'Always',
+    })
+    const workload = transformClusterExport(clusterExport([item])).workloads['demo/web']
+    expect(workload.resources).toEqual({ cpu_request_m: 300, memory_request_mib: 320, cpu_limit_m: 300, memory_limit_mib: 320 })
+  })
+
+  it('nullifies the pod limit when a native sidecar declares none', () => {
+    const item = guaranteedWithSidecar({
+      resources: { requests: { cpu: '50m', memory: '64Mi' }, limits: { cpu: '50m' } },
+      restartPolicy: 'Always',
+    })
+    const workload = transformClusterExport(clusterExport([item])).workloads['demo/web']
+    expect(workload.resources.cpu_limit_m).toBe(300)
+    expect(workload.resources.memory_limit_mib).toBeNull()
+  })
+
+  it('imports a guaranteed pod with a sidecar without a request above its limit', () => {
+    const item = guaranteedWithSidecar({
+      resources: { requests: { cpu: '50m', memory: '64Mi' }, limits: { cpu: '50m', memory: '64Mi' } },
+      restartPolicy: 'Always',
+    })
+    const { resources } = transformClusterExport(clusterExport([item])).workloads['demo/web']
+    expect(resources.cpu_request_m <= (resources.cpu_limit_m ?? Infinity)).toBe(true)
+    expect(resources.memory_request_mib <= (resources.memory_limit_mib ?? Infinity)).toBe(true)
+  })
+
+  it('ignores plain init containers when summing limits', () => {
+    // A plain init container has exited before the pod's steady state, so its
+    // limit is neither summed in nor able to make the pod unbounded. The 100m
+    // CPU limit only joins the max, which the 500m sum already dominates, and
+    // the container claims no memory at all — no memory request, so it cannot
+    // dominate the pod's memory request, and therefore no memory limit either.
+    const item = deployment({
+      initContainers: [{ resources: { requests: { cpu: '100m' }, limits: { cpu: '100m' } } }],
+    })
+    const workload = transformClusterExport(clusterExport([item])).workloads['demo/web']
+    expect(workload.resources).toEqual({ cpu_request_m: 250, memory_request_mib: 256, cpu_limit_m: 500, memory_limit_mib: 512 })
+  })
+
+  // Upstream applies the same init-container max to limits that it applies to
+  // requests: kubernetes/kubernetes v1.33.0,
+  // staging/src/k8s.io/component-helpers/resource/helpers.go,
+  // AggregateContainerLimits (called by PodLimits; AggregateContainerRequests is
+  // the identical twin). restartPolicy Always init containers add into the
+  // running sum; plain ones only raise the running max, then
+  // `maxResourceList(limits, initContainerLimits)` folds that peak in. See the
+  // tag's helpers_test.go cases "restartable-init, init and regular" and
+  // "one limited and one unlimited init container ...".
+  //
+  // Two deliberate kcap divergences:
+  //  - Upstream sums declared limits, so an undeclared limit contributes zero
+  //    ("one limited and one unlimited container ..." expects the limited
+  //    container's numbers, not unbounded). kcap's single pod limit is a runtime
+  //    ceiling rather than an API projection, so a container with no limit makes
+  //    the pod unbounded (null). For plain init containers that rule is scoped
+  //    to what the pod request already accounts for — see summedLimit.
+  //  - Upstream's init peak is `own + sum(sidecars declared before it)`;
+  //    effectiveRequest takes the plain init container alone, and summedLimit
+  //    matches it so the two stay comparable.
+  const dominatingPlainInit = (init: ExportedContainer) =>
+    deployment({
+      containers: [{ resources: { requests: { cpu: '100m', memory: '128Mi' }, limits: { cpu: '200m', memory: '256Mi' } } }],
+      initContainers: [init],
+    })
+
+  it('raises the pod limit to a dominating plain init container', () => {
+    const item = dominatingPlainInit({
+      resources: { requests: { cpu: '900m', memory: '1Gi' }, limits: { cpu: '900m', memory: '1Gi' } },
+    })
+    const workload = transformClusterExport(clusterExport([item])).workloads['demo/web']
+    expect(workload.resources).toEqual({ cpu_request_m: 900, memory_request_mib: 1024, cpu_limit_m: 900, memory_limit_mib: 1024 })
+  })
+
+  it('nullifies the pod limit when a dominating plain init container declares none', () => {
+    const item = dominatingPlainInit({ resources: { requests: { cpu: '900m' } } })
+    const workload = transformClusterExport(clusterExport([item])).workloads['demo/web']
+    expect(workload.resources.cpu_request_m).toBe(900)
+    expect(workload.resources.cpu_limit_m).toBeNull()
+    // Memory is untouched: the init container claims none, so it neither
+    // raises the memory request nor clouds the memory ceiling.
+    expect(workload.resources.memory_request_mib).toBe(128)
+    expect(workload.resources.memory_limit_mib).toBe(256)
+  })
+
+  it('takes the max across a plain init container and the sidecar-inclusive sum', () => {
+    const item = deployment({
+      containers: [{ resources: { requests: { cpu: '250m', memory: '256Mi' }, limits: { cpu: '250m', memory: '256Mi' } } }],
+      initContainers: [
+        { resources: { requests: { cpu: '50m', memory: '64Mi' }, limits: { cpu: '50m', memory: '64Mi' } }, restartPolicy: 'Always' },
+        { resources: { requests: { cpu: '400m', memory: '128Mi' }, limits: { cpu: '400m', memory: '128Mi' } } },
+      ],
+    })
+    const workload = transformClusterExport(clusterExport([item])).workloads['demo/web']
+    // CPU: the plain init container (400m) beats the 300m running sum.
+    // Memory: the 320Mi running sum beats the plain init container (128Mi).
+    expect(workload.resources).toEqual({ cpu_request_m: 400, memory_request_mib: 320, cpu_limit_m: 400, memory_limit_mib: 320 })
+  })
+
+  it('never imports a request above a non-null limit', () => {
+    const initContainers: ExportedContainer[][] = [
+      [],
+      [{ resources: { requests: { cpu: '900m', memory: '1Gi' }, limits: { cpu: '900m', memory: '1Gi' } } }],
+      [{ resources: { requests: { cpu: '900m' } } }],
+      [{ resources: { limits: { cpu: '900m', memory: '1Gi' } } }],
+      [{ resources: {} }],
+      [
+        { resources: { requests: { cpu: '50m', memory: '64Mi' }, limits: { cpu: '50m', memory: '64Mi' } }, restartPolicy: 'Always' },
+        { resources: { requests: { cpu: '900m', memory: '1Gi' } } },
+      ],
+    ]
+    for (const set of initContainers) {
+      const item = deployment({
+        containers: [{ resources: { requests: { cpu: '100m', memory: '128Mi' }, limits: { cpu: '200m', memory: '256Mi' } } }],
+        initContainers: set,
+      })
+      const { resources } = transformClusterExport(clusterExport([item])).workloads['demo/web']
+      expect(resources.cpu_request_m <= (resources.cpu_limit_m ?? Infinity)).toBe(true)
+      expect(resources.memory_request_mib <= (resources.memory_limit_mib ?? Infinity)).toBe(true)
+    }
+  })
+
+  it('appends the kind when workloads of different kinds share a namespace and name', () => {
+    const hpa = {
+      kind: 'HorizontalPodAutoscaler' as const,
+      namespace: 'demo',
+      name: 'web-hpa',
+      target: { kind: 'StatefulSet', name: 'web' },
+      min: 2,
+      max: 12,
+      metrics: [{ resource: 'cpu', target: 70 }],
+      targetCPUUtilizationPercentage: null,
+    }
+    const result = transformClusterExport(clusterExport([deployment(), deployment({ kind: 'StatefulSet', maxSurge: null }), hpa]))
+
+    expect(Object.keys(result.workloads).sort()).toEqual(['demo/web (deployment)', 'demo/web (statefulset)'])
+    expect(result.workloads['demo/web (deployment)'].name).toBe('demo/web (deployment)')
+    expect(result.warnings).toEqual(['demo/web exists as Deployment and StatefulSet — imported as separate workloads with the kind appended.'])
+    // The HPA join key already carried the kind, so it still lands on one side.
+    expect(result.workloads['demo/web (statefulset)'].hpa).not.toBeNull()
+    expect(result.workloads['demo/web (deployment)'].hpa).toBeNull()
+    expect(result.groups[0].workloads.sort()).toEqual(['demo/web (deployment)', 'demo/web (statefulset)'])
+  })
+
+  it('leaves non-colliding keys untouched', () => {
+    const result = transformClusterExport(clusterExport([deployment(), deployment({ kind: 'StatefulSet', name: 'db', maxSurge: null })]))
+
+    expect(Object.keys(result.workloads).sort()).toEqual(['demo/db', 'demo/web'])
+    expect(result.warnings).toEqual([])
   })
 
   it('imports requestless workloads at the BestEffort floor and lists them', () => {
@@ -437,6 +646,15 @@ describe('applyClusterImport', () => {
     expect(Object.keys(next.node_pools)).toEqual(['primary'])
   })
 
+  it('carries an absolute maxSurge through the whole import path unscaled', () => {
+    const absolute = transformClusterExport(clusterExport([deployment({ maxSurge: 2, replicas: 12 })])).workloads
+    for (const mode of ['merge', 'replace'] as const) {
+      const { config: next } = applyClusterImport(config(), { workloads: absolute, pools: {} }, mode)
+      expect(next.workloads['demo/web'].rollout).toEqual({ max_surge_percent: 25, max_surge_pods: 2 })
+      expect(surgeUnitOf(next.workloads['demo/web'].rollout)).toBe('pods')
+    }
+  })
+
   it('replace with created pools keeps existing pools still referenced', () => {
     const pools = deriveNodePools([{ labels: { 'cloud.google.com/gke-nodepool': 'main' }, capacity: { cpu: '4', memory: '16Gi', pods: '110' }, allocatable: { cpu: '4', memory: '16Gi', pods: '110' } }]).pools
     const { config: next } = applyClusterImport(config(), { workloads: importedWorkloads(), pools }, 'replace')
@@ -520,6 +738,43 @@ describe('parseImport', () => {
     const wrong = parseImport(JSON.stringify({ ...clusterExport([]), version: 9 }))
     expect(wrong.kind).toBe('error')
     if (wrong.kind === 'error') expect(wrong.message).toContain('version 9')
+  })
+
+  // The rollout surge mode is derived (max_surge_pods != null), never stored, so
+  // save/load has to preserve an absolute AND an explicit null verbatim — a
+  // dropped or undefined null would silently flip a pods-mode workload back to
+  // percent mode.
+  it('round-trips both rollout surge modes through save and load', () => {
+    const base = config().workloads.api
+    const original = config({
+      workloads: {
+        absolute: { ...base, name: 'absolute', rollout: { max_surge_percent: 25, max_surge_pods: 3 } },
+        percentage: { ...base, name: 'percentage', rollout: { max_surge_percent: 40, max_surge_pods: null } },
+      },
+    })
+    const parsed = parseImport(JSON.stringify(serializeScenario(original)))
+    expect(parsed.kind).toBe('scenario')
+    if (parsed.kind !== 'scenario') return
+    const absolute = parsed.config.workloads.absolute.rollout
+    const percentage = parsed.config.workloads.percentage.rollout
+    expect(absolute).toEqual({ max_surge_percent: 25, max_surge_pods: 3 })
+    expect(surgeUnitOf(absolute)).toBe('pods')
+    expect(percentage).toEqual({ max_surge_percent: 40, max_surge_pods: null })
+    expect('max_surge_pods' in percentage).toBe(true)
+    expect(percentage.max_surge_pods).toBeNull()
+    expect(surgeUnitOf(percentage)).toBe('%')
+    expect(parsed.config).toEqual(original)
+  })
+
+  it('loads a scenario saved before max_surge_pods existed, in percent mode', () => {
+    // config() carries the pre-change rollout shape: the key is simply absent.
+    const legacy = parseImport(JSON.stringify(serializeScenario(config())))
+    expect(legacy.kind).toBe('scenario')
+    if (legacy.kind !== 'scenario') return
+    const rollout = legacy.config.workloads.api.rollout
+    expect(rollout.max_surge_percent).toBe(25)
+    expect(rollout.max_surge_pods).toBeUndefined()
+    expect(surgeUnitOf(rollout)).toBe('%')
   })
 
   it('produces specific errors for empty, invalid, and unrecognized input', () => {

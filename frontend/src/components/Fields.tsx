@@ -1,5 +1,6 @@
 import { useEffect, useId, useState } from 'react'
 import type { CSSProperties, KeyboardEvent } from 'react'
+import { normalizeFieldValue } from './fieldValue'
 
 type NumberFieldProps = {
   label: string
@@ -9,6 +10,12 @@ type NumberFieldProps = {
   max?: number
   step?: number
   unit?: string
+  // When a field's number can be entered in more than one unit, the unit label
+  // becomes the picker for it (see the rollout surge field's pods/percent mode).
+  unitOptions?: string[]
+  onUnitChange?: (unit: string) => void
+  // Opts this field out of the commit-time integer rounding (see fieldValue.ts).
+  fractional?: boolean
   hint?: string
   disabled?: boolean
   sliderMin?: number
@@ -23,6 +30,9 @@ export function NumberField({
   max,
   step = 1,
   unit,
+  unitOptions,
+  onUnitChange,
+  fractional = false,
   hint,
   disabled = false,
   sliderMin,
@@ -39,10 +49,7 @@ export function NumberField({
       setDraft(String(value))
       return
     }
-    // Every numeric field on this form maps to an integer on the API. Rounding
-    // here keeps a typed "2.5" from failing validation for the whole config.
-    const rounded = Number.isInteger(step) ? Math.round(parsed) : parsed
-    const bounded = Math.min(max ?? Number.POSITIVE_INFINITY, Math.max(min ?? Number.NEGATIVE_INFINITY, rounded))
+    const bounded = normalizeFieldValue(parsed, { min, max, step, fractional })
     setDraft(String(bounded))
     if (bounded !== value) onChange(bounded)
   }
@@ -95,13 +102,25 @@ export function NumberField({
           value={draft}
           min={min}
           max={max}
-          step={step}
+          // A fractional field keeps `step` for the slider's granularity but
+          // must not report a stepMismatch for a legitimate decimal value.
+          step={fractional ? 'any' : step}
           disabled={disabled}
           onBlur={commit}
           onChange={(event) => setDraft(event.target.value)}
           onKeyDown={handleKeyDown}
         />
-        {unit && <span className="field-unit">{unit}</span>}
+        {unitOptions ? (
+          <select
+            className="field-unit-select"
+            aria-label={`${label} unit`}
+            value={unit}
+            disabled={disabled}
+            onChange={(event) => onUnitChange?.(event.target.value)}
+          >
+            {unitOptions.map((option) => <option key={option} value={option}>{option}</option>)}
+          </select>
+        ) : unit && <span className="field-unit">{unit}</span>}
       </span>
       {hasSlider && (
         <input

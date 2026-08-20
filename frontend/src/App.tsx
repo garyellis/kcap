@@ -7,6 +7,7 @@ import { ExportModal } from './components/ExportModal'
 import { NumberField, TextField, Toggle } from './components/Fields'
 import { ImportModal } from './components/ImportModal'
 import { cloneBaseline, createPool, createWorkload, nextPoolName, nextWorkloadName } from './defaults'
+import { SURGE_PERCENT_MAX, SURGE_PODS_MAX, SURGE_UNITS, surgeUnitOf, surgeUnitPatch } from './surge'
 
 const SCENARIOS = [
   ['hpa_min', 'HPA min'],
@@ -303,6 +304,22 @@ function WorkloadEditor({
     update((current) => ({ ...current, hpa: current.hpa ? { ...current.hpa, ...patch } : null }))
   }
 
+  // The surge unit is derived, never stored (see surgeUnitOf in surge.ts), so a
+  // workload loaded from a scenario file or a cluster import opens in the unit
+  // its data implies.
+  const surgePods = workload.rollout.max_surge_pods
+  const surgeMode = surgeUnitOf(workload.rollout)
+  const updateRollout = (patch: Partial<Workload['rollout']>) => {
+    update((current) => ({ ...current, rollout: { ...current.rollout, ...patch } }))
+  }
+  // Both directions convert through the replica count the engine surges at, so
+  // the picker is a pure unit change: the modelled rollout is the same before
+  // and after. surge.ts owns that arithmetic and why the percent is not rounded.
+  const switchSurgeMode = (unit: string) => {
+    const patch = surgeUnitPatch(workload, unit)
+    if (patch) updateRollout(patch)
+  }
+
   return (
     <div className="editor-view">
       <header className="editor-header">
@@ -329,7 +346,7 @@ function WorkloadEditor({
           <NumberField label="Current memory usage / pod" sliderMax={8192} value={workload.observed_memory_per_pod_mib ?? 0} min={0} max={1048576} step={16} unit="MiB" onChange={(observed_memory_per_pod_mib) => update((current) => ({ ...current, observed_memory_per_pod_mib }))} hint="Current average; feeds HPA" />
         </div>
         <div className="field-grid field-grid--four field-grid--continuation">
-          <NumberField label="Rollout max surge" sliderMax={100} value={workload.rollout.max_surge_percent} min={0} max={500} step={5} unit="%" onChange={(max_surge_percent) => update((current) => ({ ...current, rollout: { max_surge_percent } }))} hint="Applied at HPA maximum" />
+          <NumberField label="Rollout max surge" sliderMax={surgeMode === 'pods' ? 50 : 100} value={surgeMode === 'pods' ? surgePods ?? 0 : workload.rollout.max_surge_percent} min={0} max={surgeMode === 'pods' ? SURGE_PODS_MAX : SURGE_PERCENT_MAX} step={surgeMode === 'pods' ? 1 : 5} fractional={surgeMode === '%'} unit={surgeMode} unitOptions={SURGE_UNITS} onUnitChange={switchSurgeMode} onChange={(next) => updateRollout(surgeMode === 'pods' ? { max_surge_pods: next } : { max_surge_percent: next })} hint="Applied at HPA maximum" />
           {poolNames.length > 1 && (
             <label className="field">
               <span className="field-label">Node pool</span>
@@ -414,10 +431,10 @@ function WorkloadEditor({
               </div>
               <div><span>Ceiling</span><strong className="num">{hpa.max_replicas}</strong><small>HPA hard maximum</small></div>
             </div>
-            {result?.hpa_saturated && (
+            {result?.clamped_by && (
               <div className="callout callout--warn">
                 <strong>HPA saturated.</strong> Metrics recommend {result.raw_desired_replicas} pods, held at {result.desired_replicas} by the
-                {result.raw_desired_replicas > result.desired_replicas ? ' ceiling' : ' minimum'}. Requests and targets do not move the
+                {result.clamped_by === 'max' ? ' ceiling' : ' minimum'}. Requests and targets do not move the
                 projection until the recommendation re-enters the {hpa.min_replicas}–{hpa.max_replicas} range.
               </div>
             )}

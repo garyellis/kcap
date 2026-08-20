@@ -349,8 +349,16 @@ export type ResourcesSchema = {
 export type RolloutSchema = {
     /**
      * Max Surge Percent
+     *
+     * Rollout surge as a percentage of max replicas, rounded up. Ignored when max_surge_pods is set.
      */
     max_surge_percent?: number;
+    /**
+     * Max Surge Pods
+     *
+     * Absolute rollout surge in pods, mirroring an integer Deployment maxSurge. Takes precedence over max_surge_percent when set, including when set to 0.
+     */
+    max_surge_pods?: number | null;
 };
 
 /**
@@ -497,6 +505,12 @@ export type WorkloadDiffSchema = {
  * WorkloadResultSchema
  */
 export type WorkloadResultSchema = {
+    /**
+     * Clamped By
+     *
+     * Which end of the HPA range held the recommendation: 'min' when the floor raised it, 'max' when the ceiling capped it, null when it was not clamped.
+     */
+    clamped_by?: 'min' | 'max' | null;
     /**
      * Cpu Utilization Percent
      */

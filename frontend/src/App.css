@@ -224,6 +224,10 @@
 .field--invalid .field-input-wrap { border-color: var(--bad); box-shadow: 0 0 0 3px var(--bad-tint); }
 .field-input-wrap select { width: 100%; height: 100%; min-width: 0; padding: 0 8px; border: 0; outline: 0; background: transparent; color: var(--ink); font: 500 13px var(--font-mono); cursor: pointer; }
 .field-input-wrap select option { background: var(--surface); color: var(--ink); }
+/* The unit label doubling as the unit picker (rollout surge: % or pods). */
+.field-input-wrap select.field-unit-select { width: auto; max-width: 84px; height: 22px; position: absolute; right: 4px; padding: 0 2px; color: var(--text-3); font: 500 11px var(--font-mono); }
+.field-input-wrap select.field-unit-select:focus-visible { color: var(--ink); outline: none; }
+.field-input-wrap:has(.field-unit-select) input[type='number'] { padding-right: 84px; }
 .field--invalid > small { color: var(--bad); }
 .field--disabled { opacity: .45; }
 
