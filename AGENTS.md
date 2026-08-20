@@ -17,8 +17,11 @@ Keep assumptions visible. Never present an approximation as Kubernetes parity.
 - Backend layers are `api` (outer), `schemas`, then `engine` (inner). Imports may
   go inward across layers, never outward.
 - `frontend/src/api.ts` is the HTTP/type boundary; `importers.ts` holds pure
-  Kubernetes/scenario transforms; `components/` and `App.tsx` are the React UI.
-  Keep `api.ts`, `defaults.ts`, and `importers.ts` independent of UI modules.
+  Kubernetes/scenario transforms; `surge.ts` holds the rollout-surge unit math the
+  editor shares with the engine; `components/` and `App.tsx` are the React UI.
+  Keep `api.ts`, `defaults.ts`, `importers.ts`, and `surge.ts` independent of UI
+  modules — the `core-does-not-import-ui` rule in
+  `frontend/dependency-cruiser.config.mjs` enforces this list.
 - `frontend/src/generated/` comes from FastAPI OpenAPI; never hand-edit it.
 - The production image builds Vite and serves it through FastAPI on port 8100.
 
@@ -41,6 +44,9 @@ Kubernetes-sensitive behavior must be correct within kcap's stated boundaries.
 - For non-obvious or version-sensitive behavior, record tag/commit, path, and symbol
   in a short test comment or design note. If releases or feature gates differ,
   preserve kcap's tested behavior unless the task selects a target, and state the choice.
+- `docs/model-fidelity.md` is the authoritative record of how kcap models Kubernetes and where it
+  departs, with pinned upstream evidence. Changing any behavior it describes — or adding a
+  new divergence — updates that entry in the same change.
 
 Preserve these boundaries: static pools with no spillover; CPU, memory, and pod slots
 only; imported node selectors may infer a pool, but taints/tolerations, affinity,
