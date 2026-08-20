@@ -39,8 +39,9 @@ export default {
     {
       name: 'core-does-not-import-ui',
       severity: 'error',
-      comment: 'API, defaults, import logic, and surge math stay independent from React UI modules.',
-      from: { path: '^src/(?:api|defaults|importers|surge)[.]ts$' },
+      comment:
+        'API, defaults, import logic, surge math, and CA-action mapping stay independent from React UI modules.',
+      from: { path: '^src/(?:api|caAction|defaults|importers|surge)[.]ts$' },
       to: { path: '^src/(?:components/|main[.]tsx$|App[.]tsx$)' },
     },
   ],

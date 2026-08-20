@@ -1,6 +1,6 @@
 """HTTP transport schemas and domain-model adapters."""
 
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
@@ -54,7 +54,23 @@ class HpaSchema(ApiModel):
 
 
 class RolloutSchema(ApiModel):
-    max_surge_percent: float = Field(default=25.0, ge=0)
+    max_surge_percent: float = Field(
+        default=25.0,
+        ge=0,
+        description=(
+            "Rollout surge as a percentage of max replicas, rounded up. "
+            "Ignored when max_surge_pods is set."
+        ),
+    )
+    max_surge_pods: int | None = Field(
+        default=None,
+        ge=0,
+        description=(
+            "Absolute rollout surge in pods, mirroring an integer Deployment "
+            "maxSurge. Takes precedence over max_surge_percent when set, "
+            "including when set to 0."
+        ),
+    )
 
     def to_domain(self) -> engine.Rollout:
         return engine.Rollout(**self.model_dump())
@@ -197,6 +213,14 @@ class WorkloadResultSchema(ApiModel):
     raw_desired_replicas: int
     desired_replicas: int
     hpa_saturated: bool
+    clamped_by: Literal["min", "max"] | None = Field(
+        default=None,
+        description=(
+            "Which end of the HPA range held the recommendation: 'min' when "
+            "the floor raised it, 'max' when the ceiling capped it, null when "
+            "it was not clamped."
+        ),
+    )
     max_replicas: int
     rollout_replicas_at_max: int
 
@@ -215,6 +239,16 @@ class PoolScenarioResultSchema(ApiModel):
     current_nodes: int
     nodes_to_add: int
     nodes_to_remove: int
+    scale_down_blocked_reason: engine.ScaleDownBlockedReason | None = Field(
+        default=None,
+        description=(
+            "Why no scale-down is being instructed: 'oversized_pods' when pods "
+            "too large for any node were excluded from the sizing, "
+            "'no_placeable_demand' when a pool running nodes has nothing left "
+            "to place, null otherwise. When set, nodes_to_remove is 0; the "
+            "ungated difference remains current_nodes - effective_nodes_required."
+        ),
+    )
     node_headroom: int
     limiting_resource: str
     schedulable: bool

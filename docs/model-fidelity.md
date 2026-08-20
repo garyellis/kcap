@@ -99,6 +99,16 @@ though in reality adding replicas divides the same work across more pods and per
 The HPA scenarios show the shape of a response, not a converged steady state.
 `engine.py` `evaluate` ⇄ no upstream analogue
 
+**Node instructions.** `nodes_to_add` and `nodes_to_remove` are sizing arithmetic against the
+configured current node count, not a Cluster Autoscaler simulation: no candidate scan, no
+utilization threshold, no unreplicated-pod or PDB blocker, no cooldown. kcap additionally
+withholds the removal — 0, with `scale_down_blocked_reason` naming the case — whenever pods were
+excluded from the sizing as oversized, or nothing was placeable at all; a real autoscaler faced
+with an idle pool does drain it toward its minimum, and kcap declines to say so because a node
+count sized against demand it never placed is arithmetic rather than an instruction. That
+arithmetic stays derivable as `max(0, current_nodes − effective_nodes_required)`.
+`engine.py` `_evaluate_pool_scenario` ⇄ no upstream analogue
+
 ## Rollout
 
 **Surge shape.** Upstream caps a rolling update at `replicas + maxSurge`, resolving an absolute

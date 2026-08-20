@@ -3,6 +3,7 @@ import type { ReactNode } from 'react'
 import './App.css'
 import { compareClusters } from './api'
 import type { ClusterConfig, CompareResponse, NodePool, PoolScenarioResult, Workload, WorkloadResult } from './api'
+import { caAction } from './caAction'
 import { ExportModal } from './components/ExportModal'
 import { NumberField, TextField, Toggle } from './components/Fields'
 import { ImportModal } from './components/ImportModal'
@@ -517,31 +518,31 @@ function ResultsPanel({
     return { cpu, memory, cpuUnbounded, memoryUnbounded }
   }, [candidate, scenario])
 
-  // An oversized pod is not a capacity shortfall, so the autoscaler has no
-  // action that resolves it. Reporting "+N" there reads as an instruction that
-  // would not help.
-  const blockedByPodShape = (poolScenario?.oversized_pod_count ?? 0) > 0
-  const action = blockedByPodShape
-    ? 'None'
-    : poolScenario?.nodes_to_add
-      ? `+${poolScenario.nodes_to_add}`
-      : poolScenario?.nodes_to_remove
-        ? `−${poolScenario.nodes_to_remove}`
-        : 'Hold'
-  const actionClass = blockedByPodShape ? 'is-hold' : poolScenario?.nodes_to_add ? 'is-add' : poolScenario?.nodes_to_remove ? 'is-remove' : 'is-hold'
-  const actionNote = blockedByPodShape ? 'no fix' : action === 'Hold' ? 'steady' : 'nodes'
+  // Both readouts below map the engine's node deltas through `caAction`; see
+  // that module for why a blocked pool reads "None" and why an addition is
+  // never withheld.
+  const { label: action, className: actionClass, note: actionNote } = caAction({
+    nodesToAdd: poolScenario?.nodes_to_add ?? 0,
+    nodesToRemove: poolScenario?.nodes_to_remove ?? 0,
+    blockedReason: poolScenario?.scale_down_blocked_reason ?? null,
+  })
 
   const constraint = describeConstraint(poolScenario)
   const deltaNodes = scenario ? scenario.effective_nodes_required - (baselineScenario?.effective_nodes_required ?? scenario.effective_nodes_required) : 0
-  const totalAction = scenario
-    ? scenario.oversized_pod_count > 0
-      ? 'None'
-      : scenario.nodes_to_add
-        ? `+${scenario.nodes_to_add}`
-        : scenario.nodes_to_remove
-          ? `−${scenario.nodes_to_remove}`
-          : 'Hold'
-    : '—'
+  // Cluster totals carry no blocked reason, so it is read off the pools: without
+  // that, an idle cluster would total to "Hold" while every pool it sums says
+  // "None". The first reason found is enough — one blocked pool withholds an
+  // instruction from the sum, and this tile renders only the label.
+  const totalBlockedReason = scenario
+    ? Object.values(scenario.pools).find((pool) => pool.scale_down_blocked_reason)?.scale_down_blocked_reason ?? null
+    : null
+  const totalAction = !scenario
+    ? '—'
+    : caAction({
+        nodesToAdd: scenario.nodes_to_add,
+        nodesToRemove: scenario.nodes_to_remove,
+        blockedReason: totalBlockedReason,
+      }).label
 
   return (
     <aside className={`results-panel${stale ? ' is-stale' : ''}`}>
@@ -594,7 +595,7 @@ function ResultsPanel({
               <strong><i className="verdict-dot" />{poolScenario.schedulable ? 'Capacity clear' : 'Capacity blocked'}</strong>
               <p>{poolScenario.schedulable
                 ? 'All pods fit within the autoscaler envelope.'
-                : blockedByPodShape
+                : poolScenario.oversized_pod_count > 0
                   ? `${poolScenario.oversized_pod_count} pod${poolScenario.oversized_pod_count === 1 ? '' : 's'} request more than one whole node. No node count places them.`
                   : 'A placement constraint exceeds the configured envelope.'}</p>
             </div>

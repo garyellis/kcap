@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field, fields, is_dataclass, replace
 from math import ceil
-from typing import Any
+from typing import Any, Literal
 
 # Kubernetes does not act on a metric whose ratio to target sits inside this
 # band. Mirrors --horizontal-pod-autoscaler-tolerance.
@@ -33,6 +33,10 @@ class HPA:
 @dataclass(frozen=True)
 class Rollout:
     max_surge_percent: float = 25.0
+
+    # Absolute surge, mirroring a Deployment's integer `maxSurge`. Takes
+    # precedence over max_surge_percent whenever it is set, including 0.
+    max_surge_pods: int | None = None
 
 
 @dataclass(frozen=True)
@@ -119,6 +123,22 @@ class WorkloadResult:
     def hpa_saturated(self) -> bool:
         return self.raw_desired_replicas != self.desired_replicas
 
+    @property
+    def clamped_by(self) -> Literal["min", "max"] | None:
+        """Which end of the HPA range held the recommendation, if either.
+
+        `hpa_saturated` says only that a clamp happened; the direction decides
+        whether the operator raises a ceiling or lowers a floor.
+        """
+        if self.raw_desired_replicas < self.desired_replicas:
+            return "min"
+        if self.raw_desired_replicas > self.desired_replicas:
+            return "max"
+        return None
+
+
+ScaleDownBlockedReason = Literal["oversized_pods", "no_placeable_demand"]
+
 
 @dataclass(frozen=True)
 class PoolScenarioResult:
@@ -141,7 +161,14 @@ class PoolScenarioResult:
 
     current_nodes: int
     nodes_to_add: int
+
+    # nodes_to_remove is an instruction, so it is 0 whenever removing nodes
+    # cannot be instructed safely; scale_down_blocked_reason then says why. The
+    # ungated arithmetic stays derivable from current_nodes and
+    # effective_nodes_required.
     nodes_to_remove: int
+    scale_down_blocked_reason: ScaleDownBlockedReason | None
+
     node_headroom: int
 
     limiting_resource: str
@@ -703,6 +730,11 @@ def _validate_workload(
         raise ValueError(f"{name}: observed memory cannot be negative")
     if workload.rollout.max_surge_percent < 0:
         raise ValueError(f"{name}: rollout max surge cannot be negative")
+    if (
+        workload.rollout.max_surge_pods is not None
+        and workload.rollout.max_surge_pods < 0
+    ):
+        raise ValueError(f"{name}: rollout max surge pods cannot be negative")
     if workload.hpa is not None:
         _validate_hpa(name, workload.hpa)
 
@@ -854,7 +886,16 @@ def evaluate_workload(workload: Workload) -> WorkloadResult:
     else:
         max_replicas = workload.hpa.max_replicas
 
-    surge = ceil(max_replicas * workload.rollout.max_surge_percent / 100)
+    # An absolute maxSurge is a pod count, not a ratio; only a percent string
+    # scales with the replica count. Upstream: kubernetes/kubernetes v1.33.0
+    # pkg/controller/deployment/util/deployment_util.go MaxSurge() ->
+    # ResolveFenceposts() -> intstr.GetScaledValueFromIntOrPercent(..., roundUp=true):
+    # an Int value returns unscaled, a percent String scales against the replica
+    # count and rounds up.
+    if workload.rollout.max_surge_pods is not None:
+        surge = workload.rollout.max_surge_pods
+    else:
+        surge = ceil(max_replicas * workload.rollout.max_surge_percent / 100)
 
     rollout_replicas_at_max = max_replicas + surge
 
@@ -1023,7 +1064,21 @@ def _evaluate_pool_scenario(
 
     effective_nodes_required = max(nodes_required, pool.min_nodes)
     nodes_to_add = max(0, effective_nodes_required - pool.current_nodes)
-    nodes_to_remove = max(0, pool.current_nodes - effective_nodes_required)
+
+    # A removal only instructs when the sizing placed every pod behind it:
+    # oversized pods were excluded above, and a pool with nothing placeable at
+    # all would be told to remove every node it runs on.
+    scale_down_blocked_reason: ScaleDownBlockedReason | None = None
+    if oversized_pods:
+        scale_down_blocked_reason = "oversized_pods"
+    elif placeable_pod_count == 0 and pool.current_nodes > 0:
+        scale_down_blocked_reason = "no_placeable_demand"
+
+    nodes_to_remove = (
+        0
+        if scale_down_blocked_reason is not None
+        else max(0, pool.current_nodes - effective_nodes_required)
+    )
     node_headroom = pool.max_nodes - effective_nodes_required
     schedulable = not oversized_pods and effective_nodes_required <= pool.max_nodes
 
@@ -1039,6 +1094,7 @@ def _evaluate_pool_scenario(
         current_nodes=pool.current_nodes,
         nodes_to_add=nodes_to_add,
         nodes_to_remove=nodes_to_remove,
+        scale_down_blocked_reason=scale_down_blocked_reason,
         node_headroom=node_headroom,
         limiting_resource=limiting_resource,
         schedulable=schedulable,

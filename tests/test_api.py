@@ -113,9 +113,118 @@ def test_evaluate(client: TestClient, cluster_payload: dict[str, Any]) -> None:
     assert response.status_code == 200
     body = response.json()
     assert body["workloads"]["api"]["desired_replicas"] == 5
+    assert body["workloads"]["api"]["clamped_by"] is None
     assert body["scenarios"]["current"]["current_nodes"] == 2
     assert "effective_nodes_required" in body["scenarios"]["hpa_max"]
     assert "limiting_resource" in body["scenarios"]["hpa_max"]["pools"]["default"]
+    default_pool = body["scenarios"]["current"]["pools"]["default"]
+    assert default_pool["nodes_to_remove"] == 1
+    assert default_pool["scale_down_blocked_reason"] is None
+
+
+def test_evaluate_withholds_a_scale_down_for_oversized_pods(
+    client: TestClient,
+    cluster_payload: dict[str, Any],
+) -> None:
+    # 5000m never fits the fixture's 3800m allocatable node, so all four pods
+    # are excluded from the sizing and the pool falls back to its one-node
+    # minimum; ungated that would have instructed a removal.
+    payload = deepcopy(cluster_payload)
+    payload["workloads"]["api"]["resources"]["cpu_request_m"] = 5000
+    payload["workloads"]["api"]["resources"]["cpu_limit_m"] = 5000
+
+    response = client.post("/v1/evaluate", json=payload)
+
+    assert response.status_code == 200
+    pool = response.json()["scenarios"]["current"]["pools"]["default"]
+    assert pool["oversized_pod_count"] == 4
+    assert pool["nodes_to_remove"] == 0
+    assert pool["scale_down_blocked_reason"] == "oversized_pods"
+    assert pool["current_nodes"] - pool["effective_nodes_required"] == 1
+
+
+def test_evaluate_withholds_a_scale_down_with_no_placeable_demand(
+    client: TestClient,
+    cluster_payload: dict[str, Any],
+) -> None:
+    # Scaled to zero against a pool with no minimum: two running nodes, no
+    # demand to size them against.
+    payload = deepcopy(cluster_payload)
+    payload["workloads"]["api"]["current_replicas"] = 0
+    payload["node_pools"]["default"]["min_nodes"] = 0
+
+    response = client.post("/v1/evaluate", json=payload)
+
+    assert response.status_code == 200
+    pool = response.json()["scenarios"]["current"]["pools"]["default"]
+    assert pool["pod_count"] == 0
+    assert pool["nodes_to_remove"] == 0
+    assert pool["scale_down_blocked_reason"] == "no_placeable_demand"
+    assert pool["current_nodes"] - pool["effective_nodes_required"] == 2
+
+
+def test_evaluate_reports_which_end_of_the_hpa_range_clamped(
+    client: TestClient,
+    cluster_payload: dict[str, Any],
+) -> None:
+    payload = deepcopy(cluster_payload)
+    payload["workloads"]["api"]["hpa"]["min_replicas"] = 8
+
+    response = client.post("/v1/evaluate", json=payload)
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["workloads"]["api"]["desired_replicas"] == 8
+    assert body["workloads"]["api"]["clamped_by"] == "min"
+
+
+def test_evaluate_honours_an_absolute_rollout_surge(
+    client: TestClient,
+    cluster_payload: dict[str, Any],
+) -> None:
+    # maxSurge: 1 is one pod. The percent field is left at the value the
+    # default fixture carries to prove absolute takes precedence over it.
+    payload = deepcopy(cluster_payload)
+    payload["workloads"]["api"]["rollout"] = {
+        "max_surge_percent": 25,
+        "max_surge_pods": 1,
+    }
+
+    response = client.post("/v1/evaluate", json=payload)
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["workloads"]["api"]["max_replicas"] == 10
+    assert body["workloads"]["api"]["rollout_replicas_at_max"] == 11
+    assert body["scenarios"]["hpa_max_rollout"]["replicas"] == {"api": 11}
+
+
+def test_evaluate_without_max_surge_pods_keeps_the_percent_result(
+    client: TestClient,
+    cluster_payload: dict[str, Any],
+) -> None:
+    # The fixture's {"max_surge_percent": 25} at an HPA max of 10 stays at
+    # ceil(10 * 0.25) == 3 surge pods, and omitting the rollout block entirely
+    # lands on the same default.
+    omitted = deepcopy(cluster_payload)
+    del omitted["workloads"]["api"]["rollout"]
+
+    explicit_body = client.post("/v1/evaluate", json=cluster_payload).json()
+    omitted_body = client.post("/v1/evaluate", json=omitted).json()
+
+    assert explicit_body["workloads"]["api"]["rollout_replicas_at_max"] == 13
+    assert explicit_body == omitted_body
+
+
+def test_negative_max_surge_pods_is_rejected(
+    client: TestClient,
+    cluster_payload: dict[str, Any],
+) -> None:
+    cluster_payload["workloads"]["api"]["rollout"]["max_surge_pods"] = -1
+
+    response = client.post("/v1/evaluate", json=cluster_payload)
+
+    assert response.status_code == 422
 
 
 def test_compare_returns_configuration_and_impact_diffs(
