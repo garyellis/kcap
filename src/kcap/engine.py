@@ -61,6 +61,36 @@ class UsageStat:
 
 
 @dataclass(frozen=True)
+class ContainerInfo:
+    """One container's own requests, limits, and observed usage.
+
+    Analysis-only. `Workload.resources` stays the single source of truth for
+    packing, HPA math, and validation; this breakdown exists because a pod
+    total cannot say which container inside it is the one living on borrowed
+    CPU.
+
+    Requests here are *effective* requests, after Kubernetes' request := limit
+    defaulting (v1.33.0 pkg/apis/core/v1/defaults.go, SetDefaults_Pod, which
+    copies Limits into Requests per resource key). So `None` means the
+    container declared neither a request nor a limit for that resource and its
+    guaranteed floor is effectively zero -- not that it declared only a limit,
+    which defaults the request up to that limit. An explicit `0` is a distinct
+    and legal value with the same floor. A `None` limit means unbounded.
+    """
+
+    name: str
+
+    cpu_request_m: int | None = None
+    memory_request_mib: int | None = None
+
+    cpu_limit_m: int | None = None
+    memory_limit_mib: int | None = None
+
+    observed_cpu: UsageStat | None = None
+    observed_memory: UsageStat | None = None
+
+
+@dataclass(frozen=True)
 class HPA:
     min_replicas: int
     max_replicas: int
@@ -99,6 +129,12 @@ class Workload:
     usage_window_seconds: int | None = None
     # Where the statistics came from, e.g. "metrics-server-snapshot", "manual".
     usage_source: str | None = None
+
+    # The pod above, broken down per container, when that is known. None is a
+    # runtime state, not a legacy one: kcap's own workload editor is pod-level,
+    # so anything typed in by hand has no container breakdown to report. Only
+    # runtime-risk analysis reads this; placement, HPA, and node counts do not.
+    containers: tuple[ContainerInfo, ...] | None = None
 
     hpa: HPA | None = None
     rollout: Rollout = field(default_factory=Rollout)
@@ -278,6 +314,21 @@ class NodeAllocation:
     memory_remaining_mib: int
     pods_remaining: int
 
+    # Pods placed here, in placement order. The packer used to collapse to a
+    # node count, discarding which pods ended up sharing a node — the one fact
+    # runtime-risk analysis needs and aggregate arithmetic cannot recover.
+    # Retained for that analysis only: nothing in the sizing math reads it, and
+    # it stays internal to the engine rather than reaching the API.
+    #
+    # Three things a consumer must not assume. The remaining figures above
+    # start from *allocatable* (machine minus reserved), so summing this list
+    # gives what workload pods asked for and not what the node carries — the
+    # DaemonSet reservation is already outside the arithmetic, and takes no
+    # max_pods slot either. Oversized pods are excluded from packing entirely,
+    # so some of a scenario's pods sit on no NodeAllocation at all. And a pool
+    # reports at least min_nodes, so there can be fewer of these than nodes.
+    pods: list[PodRequest] = field(default_factory=list)
+
     def fits(self, pod: PodRequest) -> bool:
         return (
             pod.cpu_m <= self.cpu_remaining_m
@@ -291,6 +342,7 @@ class NodeAllocation:
         self.cpu_remaining_m -= pod.cpu_m
         self.memory_remaining_mib -= pod.memory_mib
         self.pods_remaining -= 1
+        self.pods.append(pod)
 
 
 @dataclass(frozen=True)
@@ -777,6 +829,74 @@ def _validate_usage_stat(
         raise ValueError(f"{name}: observed {dimension} peak cannot be below p95")
 
 
+def _validate_containers(
+    name: str,
+    containers: tuple[ContainerInfo, ...] | None,
+) -> None:
+    """Check a per-container breakdown for shapes no pod could have.
+
+    Deliberately light, and deliberately without any cross-check against the
+    pod-level totals: those carry Kubernetes' effective-request semantics, so
+    they do not equal a plain sum of this list whenever an init container
+    dominates, and forcing agreement would corrupt the number that packs.
+
+    Names are required and must be distinct because analysis is reported per
+    (workload, container), and Kubernetes guarantees it can be: container names
+    are unique across the union of containers, initContainers, and
+    ephemeralContainers. Upstream: kubernetes/kubernetes v1.33.0
+    pkg/apis/core/validation/validation.go, validateContainers() and
+    validateInitContainers() -- the latter seeds its `allNames` set from the
+    regular containers before checking its own.
+    """
+    if containers is None:
+        return
+    if not containers:
+        raise ValueError(
+            f"{name}: container breakdown cannot be empty; omit it instead"
+        )
+
+    seen: set[str] = set()
+    for container in containers:
+        # Blank as well as empty: the name has to identify a container to a
+        # reader, and Kubernetes requires a DNS-1123 label, which whitespace
+        # is not.
+        if not container.name.strip():
+            raise ValueError(f"{name}: container name cannot be empty")
+        if container.name in seen:
+            raise ValueError(f"{name}: duplicate container name {container.name!r}")
+        seen.add(container.name)
+
+        label = f"{name}/{container.name}"
+        for quantity, value in (
+            ("CPU request", container.cpu_request_m),
+            ("memory request", container.memory_request_mib),
+            ("CPU limit", container.cpu_limit_m),
+            ("memory limit", container.memory_limit_mib),
+        ):
+            if value is not None and value < 0:
+                raise ValueError(f"{label}: container {quantity} cannot be negative")
+
+        # Within one container, a request above its own limit is a shape
+        # Kubernetes rejects outright (v1.33.0
+        # pkg/apis/core/validation/validation.go, validateResourceRequirements:
+        # "must be less than or equal to ... limit"). This is an ordering
+        # invariant inside a single container, the same kind as peak >= avg
+        # below -- not the pod-level cross-check excluded above. It matters
+        # because the analysis this list feeds caps a container's worst-case
+        # share at its limit, which an inverted pair turns into nonsense.
+        for quantity, request, limit in (
+            ("CPU", container.cpu_request_m, container.cpu_limit_m),
+            ("memory", container.memory_request_mib, container.memory_limit_mib),
+        ):
+            if request is not None and limit is not None and request > limit:
+                raise ValueError(
+                    f"{label}: container {quantity} request cannot exceed its limit"
+                )
+
+        _validate_usage_stat(label, "CPU", container.observed_cpu)
+        _validate_usage_stat(label, "memory", container.observed_memory)
+
+
 def _validate_workload(
     cluster: ClusterConfig,
     name: str,
@@ -793,6 +913,7 @@ def _validate_workload(
         raise ValueError(f"{name}: replicas cannot be negative")
     _validate_usage_stat(name, "CPU", workload.observed_cpu_per_pod)
     _validate_usage_stat(name, "memory", workload.observed_memory_per_pod)
+    _validate_containers(name, workload.containers)
     if workload.usage_window_seconds is not None and workload.usage_window_seconds < 0:
         raise ValueError(f"{name}: usage window cannot be negative")
     if workload.rollout.max_surge_percent < 0:
@@ -1084,8 +1205,15 @@ def _shape_density(
 def _evaluate_pool_scenario(
     pool: NodePool,
     pods: list[PodRequest],
+    workloads: dict[str, Workload],
 ) -> PoolScenarioResult:
-    """Pack one pool's pods onto its machine shape and size the pool."""
+    """Pack one pool's pods onto its machine shape and size the pool.
+
+    `workloads` is the seam for per-node runtime-risk analysis: the packer now
+    retains its placements, and reaching a placed pod's requests, limits, and
+    observed usage means looking the pod's workload up by name. The sizing math
+    below reads neither, so this parameter moves no number today.
+    """
     machine = pool.machine
 
     pod_count = len(pods)
@@ -1191,7 +1319,9 @@ def evaluate_scenario(
         pods_by_pool[resolve_pool_name(cluster, workload)].append(pod)
 
     pool_results = {
-        pool_name: _evaluate_pool_scenario(pool, pods_by_pool[pool_name])
+        pool_name: _evaluate_pool_scenario(
+            pool, pods_by_pool[pool_name], cluster.workloads
+        )
         for pool_name, pool in cluster.node_pools.items()
     }
 

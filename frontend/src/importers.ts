@@ -1,4 +1,4 @@
-import type { ClusterConfig, Hpa, NodePool, UsageStat, Workload } from './api'
+import type { ClusterConfig, ContainerInfo, Hpa, NodePool, UsageStat, Workload } from './api'
 
 // Versioned import/export contract. A future in-cluster discovery endpoint
 // will emit the same kcap-cluster-export document and reuse this transform,
@@ -21,6 +21,11 @@ type Quantity = string | number | null | undefined
 type ResourceMap = { cpu?: Quantity; memory?: Quantity }
 
 export type ExportedContainer = {
+  // Every container in a real pod spec has a name, and the export projects it.
+  // Optional here because this type describes a parsed document rather than a
+  // cluster: a file written by an older export script has none, and the
+  // transform must be able to see that and say so.
+  name?: string | null
   resources?: { requests?: ResourceMap | null; limits?: ResourceMap | null } | null
   restartPolicy?: string | null
 }
@@ -51,7 +56,9 @@ export type ExportedPod = {
 export type ExportedPodUsage = {
   namespace: string
   name: string
-  containers?: Array<{ usage?: ResourceMap | null }> | null
+  // PodMetrics names each container it measures; the name is what joins the
+  // reading to a spec container. Optional for the same reason as above.
+  containers?: Array<{ name?: string | null; usage?: ResourceMap | null }> | null
 }
 
 // PodMetrics carries no labels, so the export pairs it with a pod listing
@@ -335,11 +342,27 @@ const SNAPSHOT_SOURCE = 'metrics-server-snapshot'
 // Two or more captures spaced apart — the same source, but no longer an instant.
 const SAMPLED_SOURCE = 'metrics-server-samples'
 
+export type ContainerUsage = { cpu: UsageStat; memory: UsageStat }
+
 export type ObservedUsage = {
   cpu: UsageStat
   memory: UsageStat
+  // Keyed by the container name pod metrics reported, matched or not.
+  containers: Map<string, ContainerUsage>
+  // Names pod metrics reported that this workload's pod spec does not declare
+  // — injected sidecars (E8). Empty when the spec named nothing at all, since
+  // then "unmatched" would describe the export rather than the pods.
+  unmatchedContainers: string[]
   source: string
   window_seconds: number
+}
+
+// One sample's matched-pod totals, with the same numbers split by container.
+type SampleTotals = {
+  pods: number
+  cpu: number
+  memory: number
+  byContainer: Map<string, { cpu: number; memory: number }>
 }
 
 // avg is the mean of the per-sample figures, peak the largest of them, and both
@@ -360,6 +383,17 @@ function statAcrossSamples(perSample: number[]): UsageStat {
   return { avg: Math.round(mean), p95: null, peak }
 }
 
+// Every container name the pod spec declares, init containers included, so a
+// completed init container reported by metrics is not mistaken for an injected
+// sidecar.
+function specContainerNames(item: ExportedWorkload): Set<string> {
+  const names = new Set<string>()
+  for (const container of [...(item.containers ?? []), ...(item.initContainers ?? [])]) {
+    if (container.name) names.add(container.name)
+  }
+  return names
+}
+
 // Sum container usage per pod, then average across the running pods the
 // workload's selector matches in its namespace — once per captured sample.
 // PodMetrics has no labels, so the pod listing carries the attribution. null
@@ -373,14 +407,11 @@ export function observedUsage(
   const samples = usage?.samples && usage.samples.length > 0 ? usage.samples : null
   if (!usage?.pods || !samples || !selector || Object.keys(selector).length === 0) return null
 
-  const cpuPerSample: number[] = []
-  const memoryPerSample: number[] = []
+  const counted: SampleTotals[] = []
   for (const sample of samples) {
     const metricsByPod = new Map<string, ExportedPodUsage>()
     for (const metric of sample) metricsByPod.set(`${metric.namespace}/${metric.name}`, metric)
-    let pods = 0
-    let cpu = 0
-    let memory = 0
+    const totals: SampleTotals = { pods: 0, cpu: 0, memory: 0, byContainer: new Map() }
     for (const pod of usage.pods) {
       if (pod.namespace !== item.namespace) continue
       if (pod.phase && pod.phase !== 'Running') continue
@@ -388,25 +419,109 @@ export function observedUsage(
       if (!Object.entries(selector).every(([key, value]) => labels[key] === value)) continue
       const metric = metricsByPod.get(`${pod.namespace}/${pod.name}`)
       if (!metric) continue
-      pods += 1
+      totals.pods += 1
       for (const container of metric.containers ?? []) {
-        cpu += parseCpuQuantity(container.usage?.cpu)
-        memory += parseMemoryQuantity(container.usage?.memory)
+        const cpu = parseCpuQuantity(container.usage?.cpu)
+        const memory = parseMemoryQuantity(container.usage?.memory)
+        totals.cpu += cpu
+        totals.memory += memory
+        // A reading with no name cannot be attributed to a container. It still
+        // counts toward the pod figures, which is exactly what it is.
+        if (!container.name) continue
+        const running = totals.byContainer.get(container.name) ?? { cpu: 0, memory: 0 }
+        totals.byContainer.set(container.name, { cpu: running.cpu + cpu, memory: running.memory + memory })
       }
     }
     // The pod listing is captured once, so a pod missing from an early sample
     // simply does not count toward that sample's average.
-    if (pods === 0) continue
-    cpuPerSample.push(cpu / pods)
-    memoryPerSample.push(memory / pods)
+    if (totals.pods === 0) continue
+    counted.push(totals)
   }
-  if (cpuPerSample.length === 0) return null
+  if (counted.length === 0) return null
+
+  // One series per counted sample, every one of them divided by that sample's
+  // pod count — the same denominator the pod-level figure uses, so a container
+  // average is that container's share of the pod average rather than an average
+  // over a different population. Equal lengths also mean statAcrossSamples
+  // applies its "a single sample has no peak" rule identically to all of them.
+  //
+  // A container missing from a sample therefore counts as zero for that sample,
+  // which is the opposite of the pod-level rule above (a sample with no matched
+  // pods is dropped, not zeroed). Dropping instead would be worse than
+  // asymmetric — a sidecar seen in one of three samples would have a
+  // one-element series, and one sample carries no peak, so the statistic the
+  // entitlement analysis reads would be destroyed to protect the average, which
+  // nothing reads. Zero-filling depresses that average and leaves the peak
+  // true. Recorded in docs/model-fidelity.md.
+  const perPod = (pick: (totals: SampleTotals) => number): number[] =>
+    counted.map((totals) => pick(totals) / totals.pods)
+
+  const metricNames = new Set(counted.flatMap((totals) => [...totals.byContainer.keys()]))
+  const containers = new Map<string, ContainerUsage>()
+  for (const name of metricNames) {
+    containers.set(name, {
+      cpu: statAcrossSamples(perPod((totals) => totals.byContainer.get(name)?.cpu ?? 0)),
+      memory: statAcrossSamples(perPod((totals) => totals.byContainer.get(name)?.memory ?? 0)),
+    })
+  }
+
+  const declared = specContainerNames(item)
   return {
-    cpu: statAcrossSamples(cpuPerSample),
-    memory: statAcrossSamples(memoryPerSample),
+    cpu: statAcrossSamples(perPod((totals) => totals.cpu)),
+    memory: statAcrossSamples(perPod((totals) => totals.memory)),
+    containers,
+    unmatchedContainers:
+      declared.size > 0 ? [...metricNames].filter((name) => !declared.has(name)).sort() : [],
     source: samples.length > 1 ? SAMPLED_SOURCE : SNAPSHOT_SOURCE,
     window_seconds: usage.window_seconds ?? 0,
   }
+}
+
+// Kubernetes' always-running set, the same one effectiveRequest sums: regular
+// containers plus restartPolicy-Always init containers. Plain init containers
+// finish before the pod reaches the steady state this describes.
+function runningContainers(
+  containers: ExportedContainer[],
+  initContainers: ExportedContainer[],
+): ExportedContainer[] {
+  return [...containers, ...initContainers.filter((container) => container.restartPolicy === 'Always')]
+}
+
+// The parsers return 0 both for an absent quantity and for a declared zero.
+// Either way the container claims no capacity of its own, which is what null
+// means on a ContainerInfo.
+function positiveOrNull(value: number): number | null {
+  return value > 0 ? value : null
+}
+
+// Per-container detail for the analysis that pod totals cannot answer. null
+// when the export names no containers to describe — a spec always names them,
+// so that means a script generated before names were projected, and the caller
+// reports it rather than leaving the gap silent.
+function containerBreakdown(
+  running: ExportedContainer[],
+  observed: ObservedUsage | null,
+): ContainerInfo[] | null {
+  const named = running.filter(
+    (container): container is ExportedContainer & { name: string } => Boolean(container.name),
+  )
+  if (named.length === 0 || named.length < running.length) return null
+  return named.map((container) => ({
+    name: container.name,
+    // containerRequest applies Kubernetes' request := limit default, so these
+    // are the effective requests an entitlement floor is measured from.
+    // Verified at kubernetes/kubernetes v1.33.0:
+    //   pkg/apis/core/v1/defaults.go — SetDefaults_Pod copies Limits into
+    //   Requests per resource key, for .spec.containers and .spec.initContainers
+    //   alike. It runs on a Pod, not on the PodTemplate the export reads, so
+    //   applying it here reproduces the pods the controller will create.
+    cpu_request_m: positiveOrNull(containerRequest(container, 'cpu')),
+    memory_request_mib: positiveOrNull(containerRequest(container, 'memory')),
+    cpu_limit_m: positiveOrNull(parseCpuQuantity(container.resources?.limits?.cpu)),
+    memory_limit_mib: positiveOrNull(parseMemoryQuantity(container.resources?.limits?.memory)),
+    observed_cpu: observed?.containers.get(container.name)?.cpu ?? null,
+    observed_memory: observed?.containers.get(container.name)?.memory ?? null,
+  }))
 }
 
 export type SelectorGroup = {
@@ -484,6 +599,14 @@ export function transformClusterExport(
   const warnings: string[] = []
   const notes: string[] = []
 
+  // Workloads whose export named no container, and container names pod metrics
+  // reported that no pod spec declares. Both are reported once for the import,
+  // not once per workload. Sets, not arrays: two same-kind entries sharing a
+  // namespace/name collapse to one workload key, which an array would count
+  // twice and report as "3 of 2 workloads".
+  const unnamedContainers = new Set<string>()
+  const unmatchedContainers = new Set<string>()
+
   const hpas = data.workloads.filter(isExportedHpa)
   const hpaByTarget = new Map<string, ExportedHpa>()
   for (const hpa of hpas) {
@@ -534,6 +657,16 @@ export function transformClusterExport(
     const hpa = hpaByTarget.get(`${item.namespace}/${item.kind.toLowerCase()}/${item.name}`)
     if (hpa) matchedHpas.add(hpa)
     const observed = observedUsage(item, data.usage)
+    const running = runningContainers(containers, initContainers)
+    const breakdown = containerBreakdown(running, observed)
+    if (breakdown === null && running.length > 0) unnamedContainers.add(key)
+    // Only when the breakdown was actually built. A workload whose spec names
+    // some containers but not all would otherwise report its own *unnamed*
+    // spec container as one no spec declares — contradicting the warning above
+    // about the very same workload.
+    if (breakdown !== null) {
+      for (const name of observed?.unmatchedContainers ?? []) unmatchedContainers.add(name)
+    }
     workloads[key] = {
       name: key,
       resources: {
@@ -548,6 +681,7 @@ export function transformClusterExport(
       usage_window_seconds: observed?.window_seconds ?? null,
       // Never "": the schema floors this at one character.
       usage_source: observed?.source ?? null,
+      containers: breakdown,
       hpa: hpa ? toHpa(hpa) : null,
       rollout: rolloutFromMaxSurge(item.kind, item.maxSurge),
       pool: null,
@@ -586,6 +720,24 @@ export function transformClusterExport(
       sampleCount > 1
         ? `Observed per-pod usage came from ${sampleCount} samples over ${data.usage?.window_seconds ?? 0}s. Peak is the highest per-pod average any one sample showed, not the sum of each pod's own maximum.`
         : 'Observed per-pod usage is a point-in-time average from pod metrics captured at export time. One sample carries no peak — raise USAGE_SAMPLES in the export script to capture one.',
+    )
+  }
+  if (unnamedContainers.size > 0) {
+    // Not tolerated silently, and not a compatibility path either: a real pod
+    // spec always names its containers, so this is a stale export script and
+    // the fix is to regenerate it. The pod-level numbers are unaffected. Named
+    // like carried/bestEffort, so the advice is checkable against the result.
+    warnings.push(
+      `Containers in this export carry no names, so these workloads imported pod-level only: ${[...unnamedContainers].sort().join(', ')}. Regenerate the export script for per-container detail.`,
+    )
+  }
+  if (unmatchedContainers.size > 0) {
+    // Describes the observation, not its cause: an injected sidecar looks like
+    // this, so does an ephemeral debug container, and so does a selector that
+    // matches another workload's pods — which would already be skewing the
+    // pod-level average silently.
+    notes.push(
+      `Pod metrics report containers no pod spec declares (${[...unmatchedContainers].sort().join(', ')}). Injected sidecars and ephemeral debug containers look like this; so does a selector matching another workload's pods. Their usage counts toward the pod totals, but they have no request of their own to compare it against.`,
     )
   }
   return { workloads, groups: [...groups.values()], carried, bestEffort, warnings, notes }
@@ -835,8 +987,8 @@ const WORKLOAD_PROJECTION = `[
           name: .metadata.name,
           replicas: .spec.replicas,
           maxSurge: .spec.strategy.rollingUpdate.maxSurge,
-          containers: [(.spec.template.spec.containers // [])[] | { resources }],
-          initContainers: [(.spec.template.spec.initContainers // [])[] | { resources, restartPolicy }],
+          containers: [(.spec.template.spec.containers // [])[] | { name, resources }],
+          initContainers: [(.spec.template.spec.initContainers // [])[] | { name, resources, restartPolicy }],
           selector: .spec.selector.matchLabels,
           nodeSelector: .spec.template.spec.nodeSelector,
           tolerations: .spec.template.spec.tolerations,
@@ -891,7 +1043,7 @@ const POD_METRICS_PROJECTION = `[
     | {
         namespace: .metadata.namespace,
         name: .metadata.name,
-        containers: [(.containers // [])[] | { usage: { cpu: .usage.cpu, memory: .usage.memory } }]
+        containers: [(.containers // [])[] | { name, usage: { cpu: .usage.cpu, memory: .usage.memory } }]
       }
   ]`
 
@@ -904,7 +1056,7 @@ export function buildExportScript(namespace: string, selector: string, skipZeroR
 # kcap cluster export
 #
 # Reads only what kcap needs to model capacity:
-#   - workload names, replica counts, container resource requests/limits
+#   - workload names, replica counts, container names and resource requests/limits
 #   - HPA specs (targets, min/max replicas)
 #   - scheduling constraints (nodeSelector, tolerations, required node affinity)
 #   - node capacity, allocatable, labels, and taints (when permitted)

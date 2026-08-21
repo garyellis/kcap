@@ -51,8 +51,16 @@ function config(overrides: Partial<ClusterConfig> = {}): ClusterConfig {
   }
 }
 
+// A real export names every container, and P1.6 requires the name. These
+// fixtures are about resource arithmetic, so the builder supplies names rather
+// than repeating one on every literal; an explicit name in a literal wins. The
+// nameless-export path builds its containers without this builder.
+function named(containers: ExportedContainer[], prefix: string): ExportedContainer[] {
+  return containers.map((container, index) => ({ name: `${prefix}-${index + 1}`, ...container }))
+}
+
 function deployment(overrides: Partial<ExportedWorkload> = {}): ExportedWorkload {
-  return {
+  const item: ExportedWorkload = {
     kind: 'Deployment',
     namespace: 'demo',
     name: 'web',
@@ -64,6 +72,11 @@ function deployment(overrides: Partial<ExportedWorkload> = {}): ExportedWorkload
     tolerations: null,
     nodeAffinity: null,
     ...overrides,
+  }
+  return {
+    ...item,
+    containers: named(item.containers ?? [], 'app'),
+    initContainers: named(item.initContainers ?? [], 'init'),
   }
 }
 
@@ -618,6 +631,288 @@ describe('transformClusterExport', () => {
   })
 })
 
+describe('per-container detail', () => {
+  const webPods = [
+    { namespace: 'demo', name: 'web-1', labels: { app: 'web' }, phase: 'Running' },
+    { namespace: 'demo', name: 'web-2', labels: { app: 'web' }, phase: 'Running' },
+  ]
+
+  it('builds a breakdown from the export, per container', () => {
+    const item = deployment({
+      selector: { app: 'web' },
+      containers: [
+        { name: 'app', resources: { requests: { cpu: '250m', memory: '256Mi' }, limits: { cpu: '500m', memory: '512Mi' } } },
+        // Kubernetes defaults a missing request to the limit, so this one has
+        // an effective 100m request even though it declares none.
+        { name: 'metrics', resources: { limits: { cpu: '100m' } } },
+      ],
+    })
+    const containers = transformClusterExport(clusterExport([item])).workloads['demo/web'].containers
+    expect(containers).toEqual([
+      {
+        name: 'app',
+        cpu_request_m: 250,
+        memory_request_mib: 256,
+        cpu_limit_m: 500,
+        memory_limit_mib: 512,
+        observed_cpu: null,
+        observed_memory: null,
+      },
+      {
+        name: 'metrics',
+        cpu_request_m: 100,
+        memory_request_mib: null,
+        cpu_limit_m: 100,
+        memory_limit_mib: null,
+        observed_cpu: null,
+        observed_memory: null,
+      },
+    ])
+  })
+
+  it('describes the always-running set: sidecars in, plain init containers out', () => {
+    const item = deployment({
+      initContainers: [
+        { name: 'istio-proxy', restartPolicy: 'Always', resources: { requests: { cpu: '50m', memory: '64Mi' } } },
+        { name: 'migrate', resources: { requests: { cpu: '900m', memory: '1Gi' } } },
+      ],
+    })
+    const containers = transformClusterExport(clusterExport([item])).workloads['demo/web'].containers
+    // 'migrate' has exited before the pod's steady state, so it has no
+    // entitlement to describe -- even though it dominates the pod request.
+    expect(containers?.map((container) => container.name)).toEqual(['app-1', 'istio-proxy'])
+  })
+
+  it('matches observed usage to containers by name, on the pod-level peak rule', () => {
+    // Two containers whose busiest samples fall on different ticks. Per
+    // container, peak is the highest per-container average any one sample
+    // showed -- the same reading the pod-level figure uses, so the two cannot
+    // disagree about what "peak" means.
+    const sample = (app1: string, app2: string, proxy1: string, proxy2: string) => [
+      {
+        namespace: 'demo',
+        name: 'web-1',
+        containers: [{ name: 'app', usage: { cpu: app1, memory: '128Mi' } }, { name: 'istio-proxy', usage: { cpu: proxy1, memory: '32Mi' } }],
+      },
+      {
+        namespace: 'demo',
+        name: 'web-2',
+        containers: [{ name: 'app', usage: { cpu: app2, memory: '128Mi' } }, { name: 'istio-proxy', usage: { cpu: proxy2, memory: '32Mi' } }],
+      },
+    ]
+    const usage: ExportedUsage = {
+      pods: webPods,
+      samples: [
+        sample('100m', '200m', '10m', '10m'), // app 150m, proxy 10m
+        sample('600m', '100m', '10m', '10m'), // app 350m, proxy 10m
+        sample('100m', '100m', '400m', '20m'), // app 100m, proxy 210m
+      ],
+      window_seconds: 60,
+    }
+    const item = deployment({
+      selector: { app: 'web' },
+      containers: [{ name: 'app', resources: { requests: { cpu: '250m', memory: '256Mi' } } }],
+      initContainers: [{ name: 'istio-proxy', restartPolicy: 'Always', resources: { requests: { cpu: '19m', memory: '64Mi' } } }],
+    })
+    const workload = transformClusterExport(clusterExport([item], null, usage)).workloads['demo/web']
+    const byName = new Map(workload.containers?.map((container) => [container.name, container]))
+
+    expect(byName.get('app')?.observed_cpu).toEqual({ avg: 200, p95: null, peak: 350 })
+    // The proxy peaks at 210m against a 19m request -- exactly the shape
+    // per-container detail exists to make visible, and invisible in the pod
+    // total, which never dips below the app container's own contribution.
+    expect(byName.get('istio-proxy')?.observed_cpu).toEqual({ avg: 77, p95: null, peak: 210 })
+    expect(byName.get('istio-proxy')?.cpu_request_m).toBe(19)
+    // The container series are shares of the pod series -- same samples, same
+    // denominator -- which in this fixture makes them add up exactly.
+    expect(workload.observed_cpu_per_pod?.avg).toBe(200 + 77)
+  })
+
+  it('names metric containers the spec does not declare, and keeps their usage in the pod total', () => {
+    const usage: ExportedUsage = {
+      pods: [webPods[0]],
+      samples: [[
+        {
+          namespace: 'demo',
+          name: 'web-1',
+          containers: [{ name: 'app', usage: { cpu: '100m', memory: '128Mi' } }, { name: 'linkerd-proxy', usage: { cpu: '40m', memory: '32Mi' } }],
+        },
+      ]],
+    }
+    const item = deployment({
+      selector: { app: 'web' },
+      containers: [{ name: 'app', resources: { requests: { cpu: '250m', memory: '256Mi' } } }],
+    })
+    const result = transformClusterExport(clusterExport([item], null, usage))
+    const workload = result.workloads['demo/web']
+
+    expect(workload.containers?.map((container) => container.name)).toEqual(['app'])
+    // Not silently merged into the app container, and not dropped either.
+    expect(workload.observed_cpu_per_pod?.avg).toBe(140)
+    expect(result.notes.join(' ')).toContain('linkerd-proxy')
+    expect(result.warnings).toEqual([])
+  })
+
+  it('counts a container missing from a sample as zero for that sample', () => {
+    // The deliberate asymmetry with the pod-level rule, pinned so it cannot
+    // drift: a sample with no matched *pods* is dropped from the series, but a
+    // container absent from a sample is zero-filled. Dropping would give this
+    // proxy a one-element series and therefore `peak: null` — destroying the
+    // reading entitlement analysis consumes to protect the average, which
+    // nothing reads. So the depressed avg below is the cost, and the peak
+    // beside it is the point.
+    const sample = (containers: Array<{ name: string; cpu: string }>) => [
+      {
+        namespace: 'demo',
+        name: 'web-1',
+        containers: containers.map((c) => ({ name: c.name, usage: { cpu: c.cpu, memory: '64Mi' } })),
+      },
+    ]
+    const usage: ExportedUsage = {
+      pods: [webPods[0]],
+      samples: [
+        sample([{ name: 'app', cpu: '100m' }]),
+        sample([{ name: 'app', cpu: '100m' }]),
+        sample([{ name: 'app', cpu: '100m' }, { name: 'istio-proxy', cpu: '60m' }]),
+      ],
+      window_seconds: 60,
+    }
+    const item = deployment({
+      selector: { app: 'web' },
+      containers: [{ name: 'app', resources: { requests: { cpu: '250m', memory: '256Mi' } } }],
+      initContainers: [{ name: 'istio-proxy', restartPolicy: 'Always', resources: { requests: { cpu: '19m' } } }],
+    })
+    const workload = transformClusterExport(clusterExport([item], null, usage)).workloads['demo/web']
+    const proxy = workload.containers?.find((container) => container.name === 'istio-proxy')
+
+    // [0, 0, 60] -> mean 20, max 60. Not [60] -> mean 60, peak null.
+    expect(proxy?.observed_cpu).toEqual({ avg: 20, p95: null, peak: 60 })
+    // Every series is one entry per counted sample, so a container present in
+    // only one of three samples still gets a peak — the "single sample has no
+    // peak" rule is about the capture, not about the container.
+    expect(proxy?.observed_cpu?.peak).not.toBeNull()
+    expect(workload.observed_cpu_per_pod).toEqual({ avg: 120, p95: null, peak: 160 })
+  })
+
+  it('does not report an unnamed spec container as one the spec does not declare', () => {
+    // Partial naming is the one shape where the warning and the note could
+    // contradict each other: the workload trips the stale-export warning, and
+    // its own unnamed spec container would otherwise be announced as an
+    // injected sidecar.
+    const usage: ExportedUsage = {
+      pods: [webPods[0]],
+      samples: [[
+        {
+          namespace: 'demo',
+          name: 'web-1',
+          containers: [{ name: 'app', usage: { cpu: '100m', memory: '128Mi' } }, { name: 'helper', usage: { cpu: '40m', memory: '32Mi' } }],
+        },
+      ]],
+    }
+    const item: ExportedWorkload = {
+      kind: 'Deployment',
+      namespace: 'demo',
+      name: 'web',
+      replicas: 2,
+      selector: { app: 'web' },
+      containers: [
+        { name: 'app', resources: { requests: { cpu: '250m', memory: '256Mi' } } },
+        { resources: { requests: { cpu: '50m', memory: '64Mi' } } },
+      ],
+      initContainers: [],
+    }
+    const result = transformClusterExport(clusterExport([item], null, usage))
+
+    expect(result.workloads['demo/web'].containers).toBeNull()
+    expect(result.warnings).toHaveLength(1)
+    expect(result.warnings[0]).toContain('demo/web')
+    expect(result.notes.join(' ')).not.toContain('no pod spec declares')
+  })
+
+  it('does not call every container unmatched when the export named none', () => {
+    // An export written before container names were projected names nothing,
+    // so "no spec counterpart" would describe the file, not the pods.
+    const usage: ExportedUsage = {
+      pods: [webPods[0]],
+      samples: [[{ namespace: 'demo', name: 'web-1', containers: [{ name: 'app', usage: { cpu: '100m', memory: '128Mi' } }] }]],
+    }
+    const item: ExportedWorkload = {
+      kind: 'Deployment',
+      namespace: 'demo',
+      name: 'web',
+      replicas: 2,
+      selector: { app: 'web' },
+      containers: [{ resources: { requests: { cpu: '250m', memory: '256Mi' } } }],
+      initContainers: [],
+    }
+    const result = transformClusterExport(clusterExport([item], null, usage))
+
+    expect(result.notes.join(' ')).not.toContain('no pod spec declares')
+    expect(result.workloads['demo/web'].containers).toBeNull()
+  })
+
+  it('imports pod-level only, and says so, when the export names no containers', () => {
+    // A real pod spec always names its containers, so this is a stale export
+    // script rather than a shape kcap has to keep tolerating quietly.
+    const stale: ExportedWorkload = {
+      kind: 'Deployment',
+      namespace: 'demo',
+      name: 'web',
+      replicas: 2,
+      containers: [{ resources: { requests: { cpu: '250m', memory: '256Mi' }, limits: { cpu: '500m', memory: '512Mi' } } }],
+      initContainers: [],
+    }
+    const result = transformClusterExport(clusterExport([stale]))
+    const workload = result.workloads['demo/web']
+
+    expect(workload.containers).toBeNull()
+    // The pod-level numbers are untouched: this costs detail, not correctness.
+    expect(workload.resources).toEqual({ cpu_request_m: 250, memory_request_mib: 256, cpu_limit_m: 500, memory_limit_mib: 512 })
+    expect(result.warnings).toHaveLength(1)
+    expect(result.warnings[0]).toContain('imported pod-level only: demo/web.')
+    expect(result.warnings[0]).toContain('Regenerate the export script')
+  })
+
+  it('reports one warning for the whole import, not one per workload', () => {
+    const stale = (name: string): ExportedWorkload => ({
+      kind: 'Deployment',
+      namespace: 'demo',
+      name,
+      replicas: 1,
+      containers: [{ resources: { requests: { cpu: '100m', memory: '128Mi' } } }],
+      initContainers: [],
+    })
+    const result = transformClusterExport(clusterExport([stale('a'), stale('b'), deployment({ name: 'c' })]))
+
+    expect(result.warnings).toHaveLength(1)
+    // Named, not just counted: 'regenerate the export script' is only
+    // checkable against the result if the result says which workloads.
+    expect(result.warnings[0]).toContain('demo/a, demo/b')
+    expect(result.warnings[0]).not.toContain('demo/c')
+    expect(result.workloads['demo/c'].containers).not.toBeNull()
+  })
+
+  it('leaves a workload with no containers at all alone', () => {
+    // Nothing to name and nothing to describe, so there is nothing to warn
+    // about either.
+    const result = transformClusterExport(clusterExport([deployment({ containers: [], initContainers: [] })]))
+
+    expect(result.workloads['demo/web'].containers).toBeNull()
+    expect(result.warnings).toEqual([])
+  })
+
+  it('projects container names in the export script, and nothing else new', () => {
+    const script = buildExportScript('', '')
+    expect(script).toContain('containers: [(.spec.template.spec.containers // [])[] | { name, resources }]')
+    expect(script).toContain('initContainers: [(.spec.template.spec.initContainers // [])[] | { name, resources, restartPolicy }]')
+    expect(script).toContain('containers: [(.containers // [])[] | { name, usage: { cpu: .usage.cpu, memory: .usage.memory } }]')
+    // Still names only: the widening must not have opened the projection up.
+    for (const forbidden of ['env', 'image', 'annotations', 'command', 'args']) {
+      expect(script).not.toContain(`${forbidden}:`)
+    }
+  })
+})
+
 describe('deriveNodePools', () => {
   const node = (pool: string, extra: Partial<ExportedNode> = {}): ExportedNode => ({
     labels: { 'cloud.google.com/gke-nodepool': pool, zone: 'a' },
@@ -969,7 +1264,9 @@ function rawWorkload(kind: 'Deployment' | 'StatefulSet', name: string, replicas:
     spec: {
       ...(replicas === null ? {} : { replicas }),
       selector: { matchLabels: { app: name } },
-      template: { spec: { containers: [{ name, resources: { requests: { cpu: '100m', memory: '128Mi' } } }] } },
+      // Named 'app', matching rawPodMetrics, so the executed script exercises
+      // the per-container usage join rather than tripping the unmatched note.
+      template: { spec: { containers: [{ name: 'app', resources: { requests: { cpu: '100m', memory: '128Mi' } } }] } },
     },
   }
 }
@@ -1107,6 +1404,20 @@ describe('export script execution (stub kubectl)', () => {
     }
     // Per-pod averages of 150m, 350m, 400m across the three samples.
     expect(result.workloads['default/web'].observed_cpu_per_pod).toEqual({ avg: 300, p95: null, peak: 400 })
+    // The container name survives both projections, so the join lands: this
+    // pod has one container and it carries the whole pod figure.
+    expect(result.workloads['default/web'].containers).toEqual([
+      {
+        name: 'app',
+        cpu_request_m: 100,
+        memory_request_mib: 128,
+        cpu_limit_m: null,
+        memory_limit_mib: null,
+        observed_cpu: { avg: 300, p95: null, peak: 400 },
+        observed_memory: { avg: 491, p95: null, peak: 704 },
+      },
+    ])
+    expect(result.notes.join(' ')).not.toContain('no pod spec declares')
   }, 20_000)
 
   it('round-trips the filtered export through the importer with zero warnings', () => {

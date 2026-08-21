@@ -1,15 +1,19 @@
-from dataclasses import asdict, replace
+from collections import Counter
+from dataclasses import asdict, dataclass, replace
 from math import ceil
 
 import pytest
 
+from kcap import engine
 from kcap.engine import (
     HPA,
     HPA_TOLERANCE,
     ClusterConfig,
     ClusterResult,
+    ContainerInfo,
     MachineSpec,
     NodePool,
+    PodRequest,
     Resources,
     Rollout,
     UsageStat,
@@ -943,6 +947,169 @@ def _scalar_metric_recommendation(
     return ceil(current_replicas * ratio)
 
 
+@dataclass
+class _PlacementFreeNode:
+    """The pre-P1.5 NodeAllocation: remaining capacity and nothing else."""
+
+    cpu_remaining_m: int
+    memory_remaining_mib: int
+    pods_remaining: int
+
+    def fits(self, pod: PodRequest) -> bool:
+        return (
+            pod.cpu_m <= self.cpu_remaining_m
+            and pod.memory_mib <= self.memory_remaining_mib
+            and self.pods_remaining > 0
+        )
+
+    def place(self, pod: PodRequest) -> None:
+        if not self.fits(pod):
+            raise ValueError("Pod does not fit on this node")
+        self.cpu_remaining_m -= pod.cpu_m
+        self.memory_remaining_mib -= pod.memory_mib
+        self.pods_remaining -= 1
+
+
+def placement_free_pack(
+    machine: MachineSpec,
+    pods: list[PodRequest],
+) -> tuple[list[_PlacementFreeNode], list[PodRequest]]:
+    """The pre-P1.5 _pack_pods(), reproduced with no retained placements.
+
+    Same first-fit-decreasing walk over the same ordering, onto nodes that
+    forget what they placed. Substituted for the shipped packer, it evaluates a
+    configuration exactly as the engine did before placements were kept.
+    """
+    oversized: list[PodRequest] = []
+    candidates: list[PodRequest] = []
+    for pod in pods:
+        if (
+            pod.cpu_m > machine.allocatable_cpu_m
+            or pod.memory_mib > machine.allocatable_memory_mib
+        ):
+            oversized.append(pod)
+        else:
+            candidates.append(pod)
+    candidates.sort(
+        key=lambda pod: (
+            max(
+                pod.cpu_m / machine.allocatable_cpu_m,
+                pod.memory_mib / machine.allocatable_memory_mib,
+            ),
+            pod.cpu_m / machine.allocatable_cpu_m
+            + pod.memory_mib / machine.allocatable_memory_mib,
+            pod.cpu_m,
+            pod.memory_mib,
+            pod.workload_name,
+        ),
+        reverse=True,
+    )
+
+    nodes: list[_PlacementFreeNode] = []
+    for pod in candidates:
+        for node in nodes:
+            if node.fits(pod):
+                node.place(pod)
+                break
+        else:
+            node = _PlacementFreeNode(
+                cpu_remaining_m=machine.allocatable_cpu_m,
+                memory_remaining_mib=machine.allocatable_memory_mib,
+                pods_remaining=machine.max_pods,
+            )
+            node.place(pod)
+            nodes.append(node)
+
+    return nodes, oversized
+
+
+class TestRetainedPlacements:
+    """The packer keeps its placements; nothing downstream reads them yet.
+
+    Retention exists so runtime-risk analysis can ask who shares a node with
+    whom — the one fact aggregate arithmetic cannot recover. Until that analysis
+    lands, the placements must move no number at all.
+    """
+
+    def test_node_math_is_identical_without_retained_placements(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Regression proof that retaining placements is inert.
+
+        The representative multi-workload, multi-pool configuration is
+        evaluated twice: once through the shipped engine and once with
+        placement_free_pack() substituted for the packer, which packs the same
+        way onto nodes that discard what they hold. The comparison is over the
+        whole ClusterResult via dataclasses.asdict -- every field of all five
+        scenarios, per pool, plus every workload result.
+
+        The shadow stops at the packer deliberately. Copying the pool sizing
+        instead would duplicate P0.3's scale-down gate, go stale the moment a
+        later phase adds a field to PoolScenarioResult, and prove nothing the
+        substitution does not. Scoped this way the test also expires honestly:
+        the first phase whose analysis reads NodeAllocation.pods makes the
+        result genuinely depend on retention, and this test says so by failing.
+        """
+        cluster = representative_cluster()
+        packs: list[int] = []
+
+        def counting_pack(
+            machine: MachineSpec,
+            pods: list[PodRequest],
+        ) -> tuple[list[_PlacementFreeNode], list[PodRequest]]:
+            packs.append(1)
+            return placement_free_pack(machine, pods)
+
+        # Order is load-bearing: the shipped result must be taken before the
+        # packer is swapped, or the shadow is compared against itself.
+        shipped = asdict(evaluate(cluster))
+        monkeypatch.setattr(engine, "_pack_pods", counting_pack)
+
+        assert asdict(evaluate(cluster)) == shipped
+        # Without this the test passes vacuously the day _pack_pods stops
+        # being the function evaluate() reaches -- inlined, or bound at import
+        # by a new call site. Two pools x five scenarios.
+        assert len(packs) == 10, "the shadow packer was not the one that ran"
+
+    def test_every_placed_pod_is_retained_on_the_node_that_holds_it(self) -> None:
+        machine = MachineSpec(cpu_m=4000, memory_mib=8192, max_pods=110)
+        pods = [
+            PodRequest("api", cpu_m=1500, memory_mib=2048),
+            PodRequest("api", cpu_m=1500, memory_mib=2048),
+            PodRequest("worker", cpu_m=1500, memory_mib=2048),
+            PodRequest("oversized", cpu_m=9000, memory_mib=512),
+        ]
+
+        nodes, oversized = engine._pack_pods(machine, pods)
+
+        # Two nodes: 4000m of CPU holds two 1500m pods, not three.
+        assert len(nodes) == 2
+        assert oversized == [PodRequest("oversized", cpu_m=9000, memory_mib=512)]
+
+        placed = [pod for node in nodes for pod in node.pods]
+        assert Counter(placed) == Counter(pods[:3])
+        # "In placement order" is a promise the field comment makes, so it is
+        # asserted rather than assumed -- and placement order is not input
+        # order. These three pods tie on every sizing term, so the sort falls
+        # through to workload_name, descending: worker is placed first, then
+        # both api pods, and first-fit fills node one before opening node two.
+        api = PodRequest("api", cpu_m=1500, memory_mib=2048)
+        assert nodes[0].pods == [PodRequest("worker", cpu_m=1500, memory_mib=2048), api]
+        assert nodes[1].pods == [api]
+
+        # Each node's retained list accounts for exactly the capacity it spent,
+        # so the placements describe the packing rather than shadowing it.
+        for node in nodes:
+            assert node.cpu_remaining_m == machine.allocatable_cpu_m - sum(
+                pod.cpu_m for pod in node.pods
+            )
+            assert node.memory_remaining_mib == machine.allocatable_memory_mib - sum(
+                pod.memory_mib for pod in node.pods
+            )
+            assert node.pods_remaining == machine.max_pods - len(node.pods)
+
+
 def _with_tails(stat: UsageStat | None) -> UsageStat | None:
     """Same average, with a p95 and a peak far above it."""
     if stat is None:
@@ -1045,6 +1212,146 @@ class TestUsageStatistics:
         )
 
         assert asdict(evaluate(plain)) == asdict(evaluate(with_tails))
+
+
+class TestContainerBreakdown:
+    """Per-container detail is analysis-only, validated lightly, and inert.
+
+    Pod-level Resources stays the single source of truth for packing, HPA math,
+    and validation; nothing downstream reads this list yet.
+    """
+
+    def test_containers_move_nothing_in_the_whole_result(self) -> None:
+        # Every workload in the multi-workload, multi-pool fixture gains a
+        # breakdown whose numbers deliberately disagree with its pod totals --
+        # a sidecar the pod request never counted, a limit the pod does not
+        # carry, usage far above the average the HPA reads. No number anywhere
+        # in the result may move.
+        plain = representative_cluster()
+        with_containers = replace(
+            plain,
+            workloads={
+                name: replace(
+                    workload,
+                    containers=(
+                        ContainerInfo(
+                            name="app",
+                            cpu_request_m=workload.resources.cpu_request_m,
+                            memory_request_mib=workload.resources.memory_request_mib,
+                            cpu_limit_m=9000,
+                            observed_cpu=UsageStat(avg=10, peak=8000),
+                        ),
+                        ContainerInfo(name="istio-proxy", cpu_request_m=19),
+                    ),
+                )
+                for name, workload in plain.workloads.items()
+            },
+        )
+
+        assert asdict(evaluate(plain)) == asdict(evaluate(with_containers))
+
+    def test_a_breakdown_is_not_cross_checked_against_the_pod_totals(self) -> None:
+        # The pod numbers are effective requests, so an init container can set
+        # them and a plain sum of the containers will not match. Requiring
+        # agreement would reject configurations a real cluster produces.
+        cluster = cluster_with(
+            Workload(
+                name="api",
+                resources=Resources(900, 1024),
+                current_replicas=2,
+                containers=(ContainerInfo(name="app", cpu_request_m=100),),
+            )
+        )
+
+        # No assertion by design: the whole claim is that validate() does not
+        # raise on a breakdown that disagrees with the pod totals.
+        validate(cluster)
+
+    def test_a_container_request_may_equal_but_not_exceed_its_own_limit(self) -> None:
+        # The boundary of the check above: equal is the Guaranteed shape, and
+        # a declared limit with no request is what Kubernetes defaults up.
+        cluster = cluster_with(
+            Workload(
+                name="api",
+                resources=Resources(500, 256),
+                current_replicas=2,
+                containers=(
+                    ContainerInfo(name="app", cpu_request_m=500, cpu_limit_m=500),
+                    ContainerInfo(name="istio-proxy", cpu_limit_m=100),
+                ),
+            )
+        )
+
+        validate(cluster)
+
+    @pytest.mark.parametrize(
+        ("containers", "message"),
+        [
+            ((), "container breakdown cannot be empty"),
+            ((ContainerInfo(name=""),), "container name cannot be empty"),
+            (
+                (ContainerInfo(name="app"), ContainerInfo(name="app")),
+                "duplicate container name 'app'",
+            ),
+            (
+                (ContainerInfo(name="app", cpu_request_m=-1),),
+                "container CPU request cannot be negative",
+            ),
+            (
+                (ContainerInfo(name="app", memory_limit_mib=-1),),
+                "container memory limit cannot be negative",
+            ),
+            (
+                (ContainerInfo(name="app", observed_cpu=UsageStat(avg=100, peak=50)),),
+                "observed CPU peak cannot be below avg",
+            ),
+            (
+                (ContainerInfo(name="app", cpu_request_m=200, cpu_limit_m=100),),
+                "container CPU request cannot exceed its limit",
+            ),
+            (
+                (
+                    ContainerInfo(
+                        name="app", memory_request_mib=512, memory_limit_mib=256
+                    ),
+                ),
+                "container memory request cannot exceed its limit",
+            ),
+            ((ContainerInfo(name="   "),), "container name cannot be empty"),
+        ],
+    )
+    def test_light_validation_rejects_impossible_breakdowns(
+        self,
+        containers: tuple[ContainerInfo, ...],
+        message: str,
+    ) -> None:
+        cluster = cluster_with(
+            Workload(
+                name="api",
+                resources=Resources(500, 256),
+                current_replicas=2,
+                containers=containers,
+            )
+        )
+
+        with pytest.raises(ValueError, match=message):
+            validate(cluster)
+
+    def test_a_rejected_container_is_named_in_the_message(self) -> None:
+        cluster = cluster_with(
+            Workload(
+                name="api",
+                resources=Resources(500, 256),
+                current_replicas=2,
+                containers=(
+                    ContainerInfo(name="app"),
+                    ContainerInfo(name="istio-proxy", cpu_limit_m=-5),
+                ),
+            )
+        )
+
+        with pytest.raises(ValueError, match="api/istio-proxy"):
+            validate(cluster)
 
 
 class TestRolloutAbsoluteSurge:

@@ -316,6 +316,148 @@ def test_a_negative_usage_statistic_is_rejected(
     assert response.json()["detail"][0]["loc"][-2:] == ["observed_cpu_per_pod", "p95"]
 
 
+CONTAINER_BREAKDOWN = [
+    {
+        "name": "app",
+        "cpu_request_m": 481,
+        "memory_request_mib": 192,
+        "cpu_limit_m": 1000,
+        "memory_limit_mib": 512,
+        "observed_cpu": {"avg": 380, "peak": 900},
+    },
+    {
+        "name": "istio-proxy",
+        "cpu_request_m": 19,
+        "memory_request_mib": 64,
+        "observed_cpu": {"avg": 20, "peak": 210},
+    },
+]
+
+
+def test_a_container_breakdown_moves_no_result(
+    client: TestClient,
+    cluster_payload: dict[str, Any],
+) -> None:
+    # Analysis-only: the breakdown is carried, validated, and read by nothing.
+    # Its usage peaks are far above the average the HPA reads, and its requests
+    # deliberately do not sum to the pod request.
+    payload = deepcopy(cluster_payload)
+    payload["workloads"]["api"]["containers"] = deepcopy(CONTAINER_BREAKDOWN)
+
+    with_containers = client.post("/v1/evaluate", json=payload)
+    without = client.post("/v1/evaluate", json=cluster_payload)
+
+    assert with_containers.status_code == 200
+    assert with_containers.json() == without.json()
+
+
+def test_an_unnamed_container_is_rejected_at_the_field(
+    client: TestClient,
+    cluster_payload: dict[str, Any],
+) -> None:
+    payload = deepcopy(cluster_payload)
+    payload["workloads"]["api"]["containers"] = [{"name": ""}]
+
+    response = client.post("/v1/evaluate", json=payload)
+
+    assert response.status_code == 422
+    assert response.json()["detail"][0]["loc"][-2:] == [0, "name"]
+
+
+def test_an_empty_container_list_is_rejected(
+    client: TestClient,
+    cluster_payload: dict[str, Any],
+) -> None:
+    # Null says "no breakdown known"; an empty list would say a pod has no
+    # containers, which no pod does. One spelling, so consumers cannot differ.
+    payload = deepcopy(cluster_payload)
+    payload["workloads"]["api"]["containers"] = []
+
+    response = client.post("/v1/evaluate", json=payload)
+
+    assert response.status_code == 422
+    assert response.json()["detail"][0]["loc"][-1] == "containers"
+
+
+def test_duplicate_container_names_are_rejected(
+    client: TestClient,
+    cluster_payload: dict[str, Any],
+) -> None:
+    # Analysis is reported per (workload, container), so the name has to
+    # identify one container -- which Kubernetes guarantees it does.
+    payload = deepcopy(cluster_payload)
+    payload["workloads"]["api"]["containers"] = [{"name": "app"}, {"name": "app"}]
+
+    response = client.post("/v1/evaluate", json=payload)
+
+    assert response.status_code == 422
+    assert "duplicate container name 'app'" in response.text
+
+
+def test_a_container_breakdown_surfaces_in_the_configuration_diff(
+    client: TestClient,
+    cluster_payload: dict[str, Any],
+) -> None:
+    # compare_config recurses over every dataclass field, so adding
+    # containers to Workload widened /v1/compare whether or not the analysis
+    # reads it -- the same knock-on UsageStat had. Pinned rather than
+    # discovered later: this is the first sequence-valued leaf in the diff, so
+    # unlike resources.cpu_limit_m it reports the whole list rather than the
+    # one container that changed. A tuple is not a dataclass, so
+    # _compare_config_values cannot recurse into it.
+    candidate = deepcopy(cluster_payload)
+    candidate["workloads"]["api"]["containers"] = deepcopy(CONTAINER_BREAKDOWN)
+
+    response = client.post(
+        "/v1/compare",
+        json={"baseline": cluster_payload, "candidate": candidate},
+    )
+
+    assert response.status_code == 200
+    change = response.json()["configuration_diff"]["changes"][
+        "workloads.api.containers"
+    ]
+    assert change["before"] is None
+    assert [container["name"] for container in change["after"]] == [
+        "app",
+        "istio-proxy",
+    ]
+
+
+def test_a_container_request_above_its_own_limit_is_rejected(
+    client: TestClient,
+    cluster_payload: dict[str, Any],
+) -> None:
+    # Within one container this is a shape Kubernetes rejects outright, and
+    # the analysis this list feeds caps a worst-case share at the limit.
+    payload = deepcopy(cluster_payload)
+    payload["workloads"]["api"]["containers"] = [
+        {"name": "app", "cpu_request_m": 500, "cpu_limit_m": 100}
+    ]
+
+    response = client.post("/v1/evaluate", json=payload)
+
+    assert response.status_code == 422
+    assert "api/app: container CPU request cannot exceed its limit" in response.text
+
+
+def test_a_container_peak_below_its_average_is_rejected(
+    client: TestClient,
+    cluster_payload: dict[str, Any],
+) -> None:
+    # The same ordering invariant as the pod-level statistics, named per
+    # container so the offending one can be found.
+    payload = deepcopy(cluster_payload)
+    payload["workloads"]["api"]["containers"] = [
+        {"name": "istio-proxy", "observed_cpu": {"avg": 210, "peak": 19}}
+    ]
+
+    response = client.post("/v1/evaluate", json=payload)
+
+    assert response.status_code == 422
+    assert "api/istio-proxy: observed CPU peak cannot be below avg" in response.text
+
+
 def test_compare_reports_usage_changes_per_statistic(
     client: TestClient,
     cluster_payload: dict[str, Any],

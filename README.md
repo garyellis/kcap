@@ -70,9 +70,11 @@ Then open http://localhost:8100. Interactive API docs are at `/docs`.
   memory, `max_pods`, min/current/max node counts — plus workloads with per-pod
   requests, current replicas, observed per-pod usage, an optional HPA, and a
   rollout max-surge. Observed usage is a summary — `avg`, plus optional `p95`
-  and `peak` — alongside the capture window and source it came from. Each
-  workload is pinned to one pool (the assignment may be omitted only when there
-  is a single pool). CPU is millicores, memory is MiB.
+  and `peak` — alongside the capture window and source it came from. A cluster
+  import additionally carries a per-container breakdown of each pod (requests,
+  limits, and usage per container); the editor is pod-level and never produces
+  one. Each workload is pinned to one pool (the assignment may be omitted only
+  when there is a single pool). CPU is millicores, memory is MiB.
 - **HPA math follows Kubernetes.** Utilization is `usage / request` per pod and
   reads the average usage, nothing else — the controller compares its target
   against current *average* utilization. Each configured metric produces its
@@ -109,7 +111,11 @@ POST /v1/compare     {baseline, candidate} -> both results, config diff, impact 
   math, or node counts.
 - Only the `avg` of observed usage is read, by the HPA math. `p95`, `peak`, the
   capture window, and the usage source are accepted and validated but affect no
-  result yet.
+  result yet. The same is true of the optional per-container breakdown an
+  import builds — requests, limits, and usage per container are carried and
+  validated, but placement, HPA math, and node counts never read them. (They
+  do appear in `/v1/compare`'s configuration diff, which reports every changed
+  input.)
 - First-fit-decreasing is a heuristic; the real scheduler will sometimes do
   better and sometimes worse.
 

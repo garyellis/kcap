@@ -2,6 +2,7 @@ import type {
   ClusterConfigSchema,
   ClusterResultSchema,
   CompareResponse as ApiCompareResponse,
+  ContainerInfoSchema,
   HpaSchema,
   MachineSpecSchema,
   NodePoolSchema,
@@ -23,6 +24,9 @@ type MachineSpec = WithDefaults<
 >
 type Rollout = WithDefaults<RolloutSchema, 'max_surge_percent'>
 export type UsageStat = UsageStatSchema
+// Per-container detail an import can supply. Analysis-only, and absent from
+// anything the workload editor builds — kcap's editor is pod-level.
+export type ContainerInfo = ContainerInfoSchema
 // Observed usage is a UsageStat summary everywhere: the editor, the defaults,
 // and the importer all produce one, and it is the only form the API accepts.
 type WorkloadWithDefaults = WithDefaults<

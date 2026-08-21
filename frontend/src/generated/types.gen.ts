@@ -123,6 +123,56 @@ export type ConfigValueChangeSchema = {
 };
 
 /**
+ * ContainerInfoSchema
+ *
+ * One container's own requests, limits, and observed usage.
+ *
+ * Analysis-only, and deliberately not cross-checked against the pod-level
+ * `resources`: those carry Kubernetes' effective-request semantics, so they
+ * do not equal a plain sum of this list whenever an init container dominates.
+ */
+export type ContainerInfoSchema = {
+    /**
+     * Cpu Limit M
+     *
+     * Per-container CPU limit in millicores; null when unbounded.
+     */
+    cpu_limit_m?: number | null;
+    /**
+     * Cpu Request M
+     *
+     * Effective per-container CPU request in millicores, after Kubernetes' request := limit defaulting. Null means the container declared neither a request nor a limit, so its guaranteed floor is effectively zero; an explicit 0 is legal and means the same floor, which is why this is ge=0 where the pod-level request is gt=0. Must not exceed cpu_limit_m when both are given.
+     */
+    cpu_request_m?: number | null;
+    /**
+     * Memory Limit Mib
+     *
+     * Per-container memory limit in MiB; null when unbounded.
+     */
+    memory_limit_mib?: number | null;
+    /**
+     * Memory Request Mib
+     *
+     * Effective per-container memory request in MiB, on the same rule as cpu_request_m; null when neither request nor limit was declared.
+     */
+    memory_request_mib?: number | null;
+    /**
+     * Name
+     *
+     * Container name as the pod spec spells it. Unique within a pod, and how observed per-container usage is matched to a container.
+     */
+    name: string;
+    /**
+     * Observed CPU usage for this container, per pod, in millicores.
+     */
+    observed_cpu?: UsageStatSchema | null;
+    /**
+     * Observed memory usage for this container, per pod, in MiB.
+     */
+    observed_memory?: UsageStatSchema | null;
+};
+
+/**
  * HTTPValidationError
  */
 export type HttpValidationError = {
@@ -584,6 +634,12 @@ export type WorkloadResultSchema = {
  * WorkloadSchema
  */
 export type WorkloadSchema = {
+    /**
+     * Containers
+     *
+     * This workload's pod broken down per container, when that is known. Null for a workload configured by hand — kcap's editor is pod-level — and for an import that carried no container detail. Analysis-only: placement, HPA math, and node counts never read it.
+     */
+    containers?: Array<ContainerInfoSchema> | null;
     /**
      * Current Replicas
      */

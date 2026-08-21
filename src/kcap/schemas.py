@@ -111,6 +111,78 @@ class UsageStatSchema(ApiModel):
         return engine.UsageStat(**self.model_dump())
 
 
+class ContainerInfoSchema(ApiModel):
+    """One container's own requests, limits, and observed usage.
+
+    Analysis-only, and deliberately not cross-checked against the pod-level
+    `resources`: those carry Kubernetes' effective-request semantics, so they
+    do not equal a plain sum of this list whenever an init container dominates.
+    """
+
+    name: str = Field(
+        min_length=1,
+        description=(
+            "Container name as the pod spec spells it. Unique within a pod, "
+            "and how observed per-container usage is matched to a container."
+        ),
+    )
+    cpu_request_m: int | None = Field(
+        default=None,
+        ge=0,
+        description=(
+            "Effective per-container CPU request in millicores, after "
+            "Kubernetes' request := limit defaulting. Null means the container "
+            "declared neither a request nor a limit, so its guaranteed floor "
+            "is effectively zero; an explicit 0 is legal and means the same "
+            "floor, which is why this is ge=0 where the pod-level request is "
+            "gt=0. Must not exceed cpu_limit_m when both are given."
+        ),
+    )
+    memory_request_mib: int | None = Field(
+        default=None,
+        ge=0,
+        description=(
+            "Effective per-container memory request in MiB, on the same rule "
+            "as cpu_request_m; null when neither request nor limit was declared."
+        ),
+    )
+    cpu_limit_m: int | None = Field(
+        default=None,
+        ge=0,
+        description="Per-container CPU limit in millicores; null when unbounded.",
+    )
+    memory_limit_mib: int | None = Field(
+        default=None,
+        ge=0,
+        description="Per-container memory limit in MiB; null when unbounded.",
+    )
+    observed_cpu: UsageStatSchema | None = Field(
+        default=None,
+        description="Observed CPU usage for this container, per pod, in millicores.",
+    )
+    observed_memory: UsageStatSchema | None = Field(
+        default=None,
+        description="Observed memory usage for this container, per pod, in MiB.",
+    )
+
+    def to_domain(self) -> engine.ContainerInfo:
+        return engine.ContainerInfo(
+            name=self.name,
+            cpu_request_m=self.cpu_request_m,
+            memory_request_mib=self.memory_request_mib,
+            cpu_limit_m=self.cpu_limit_m,
+            memory_limit_mib=self.memory_limit_mib,
+            observed_cpu=(
+                self.observed_cpu.to_domain() if self.observed_cpu is not None else None
+            ),
+            observed_memory=(
+                self.observed_memory.to_domain()
+                if self.observed_memory is not None
+                else None
+            ),
+        )
+
+
 class WorkloadSchema(ApiModel):
     name: str = Field(min_length=1)
     resources: ResourcesSchema
@@ -137,6 +209,16 @@ class WorkloadSchema(ApiModel):
         description=(
             "Where the observed usage came from, e.g. "
             "'metrics-server-snapshot' or 'manual'."
+        ),
+    )
+    containers: list[ContainerInfoSchema] | None = Field(
+        default=None,
+        min_length=1,
+        description=(
+            "This workload's pod broken down per container, when that is "
+            "known. Null for a workload configured by hand — kcap's editor is "
+            "pod-level — and for an import that carried no container detail. "
+            "Analysis-only: placement, HPA math, and node counts never read it."
         ),
     )
     hpa: HpaSchema | None = None
@@ -167,6 +249,11 @@ class WorkloadSchema(ApiModel):
             ),
             usage_window_seconds=self.usage_window_seconds,
             usage_source=self.usage_source,
+            containers=(
+                tuple(container.to_domain() for container in self.containers)
+                if self.containers is not None
+                else None
+            ),
             hpa=self.hpa.to_domain() if self.hpa is not None else None,
             rollout=self.rollout.to_domain(),
             pool=self.pool,

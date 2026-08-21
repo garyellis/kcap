@@ -3,6 +3,7 @@ import type { ReactNode } from 'react'
 import './App.css'
 import { compareClusters } from './api'
 import type { ClusterConfig, CompareResponse, NodePool, PoolScenarioResult, UsageStat, Workload, WorkloadResult } from './api'
+import { withPodEdit } from './breakdown'
 import { caAction } from './caAction'
 import { ExportModal } from './components/ExportModal'
 import { NumberField, TextField, Toggle } from './components/Fields'
@@ -284,8 +285,11 @@ function WorkloadEditor({
   const resources = workload.resources
   const hpa = workload.hpa
 
+  // Editing the pod's shape or its observed load invalidates any imported
+  // per-container breakdown, which this editor cannot restate — breakdown.ts
+  // owns that rule and why it is enforced at the edit rather than by comparison.
   const updateResources = (patch: Partial<Workload['resources']>) => {
-    update((current) => ({ ...current, resources: { ...current.resources, ...patch } }))
+    update((current) => withPodEdit(current, { resources: { ...current.resources, ...patch } }))
   }
 
   const updateRequest = (kind: 'cpu' | 'memory', value: number) => {
@@ -314,7 +318,7 @@ function WorkloadEditor({
   const updateUsage = (
     dimension: 'observed_cpu_per_pod' | 'observed_memory_per_pod',
     stat: UsageStat,
-  ) => update((current) => ({ ...current, [dimension]: stat }))
+  ) => update((current) => withPodEdit(current, { [dimension]: stat }))
 
   // The surge unit is derived, never stored (see surgeUnitOf in surge.ts), so a
   // workload loaded from a scenario file or a cluster import opens in the unit

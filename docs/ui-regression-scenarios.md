@@ -47,7 +47,7 @@ Then open <http://localhost:8123>.
 **Expect:** connection pill reads `Live`; the scenario tabs (`HPA min`, `Current`, `Desired`,
 `HPA max`, `Rollout`) each show a pod count; the verdict reads `Capacity clear`; no console
 errors.
-**Origin:** baseline · **Last verified:** 2026-08-20 (Session E, re-walked after the compat cleanup)
+**Origin:** baseline · **Last verified:** 2026-08-20 (Session F)
 
 ### R2 — Observed usage moves the HPA recommendation
 **Pins:** the usage editor reaches `evaluate_hpa` end to end. The editor posts the
@@ -193,7 +193,7 @@ dialog.
 **Expect:** the workload lands as `demo/web` with **CPU request** `600` mCPU and **CPU limit
 value** `600` mCPU (500 + 100 on both sides), memory `640` / `640` MiB, the evaluation is
 `Live`, and no 422 appears in the console or the server log.
-**Origin:** P0.1 (Session A) · **Last verified:** 2026-08-20 (Session E, re-walked after the compat cleanup)
+**Origin:** P0.1 (Session A) · **Last verified:** 2026-08-20 (Session F, re-walked after F1 gained container names)
 
 ### R12 — An absolute maxSurge survives the import
 **Pins:** the importer half of P0.2 — `maxSurge: 1` maps to pods, not to a percentage of
@@ -201,7 +201,7 @@ current replicas.
 **Steps:** with F1 imported (it carries `maxSurge: 1`), read the **Rollout max surge** field.
 **Expect:** the unit picker shows `pods` and the value is `1`, derived from the imported
 config rather than stored separately.
-**Origin:** P0.2 (Session B) · **Last verified:** 2026-08-20 (Session E, re-walked after the compat cleanup)
+**Origin:** P0.2 (Session B) · **Last verified:** 2026-08-20 (Session F)
 
 ### R13 — Same-named workloads of different kinds both survive
 **Pins:** P0.4 — `namespace/name` alone let a Deployment and a StatefulSet silently replace
@@ -209,7 +209,7 @@ each other.
 **Steps:** import fixture **F2**.
 **Expect:** two workloads appear, keyed `demo/web (deployment)` and `demo/web (statefulset)`,
 with exactly one warning explaining the rename.
-**Origin:** P0.4 (Session A) · **Last verified:** 2026-08-20 (Session D)
+**Origin:** P0.4 (Session A) · **Last verified:** 2026-08-20 (Session F, re-walked after F2 gained container names)
 
 ### R17 — A scenario from any other version is refused, not guessed at
 **Pins:** the version check that closes E26. This branch used to accept *any* version, so a
@@ -223,6 +223,44 @@ expected 3.` and the same sentence for `999`. The configuration behind the dialo
 in both cases, and the commit button never becomes available. R14 covers the version-3 file
 that does load.
 **Origin:** P1.3, rewritten by the Session E cleanup · **Last verified:** 2026-08-20 (Session E, re-walked after the compat cleanup)
+
+### R18 — Per-container detail arrives, or the dialog says why it did not
+**Pins:** P1.6. Per-container requests, limits, and usage have no readout of their own — the
+analysis that will use them is Phase 2 — so the only places the screen can lie are the import
+dialog's two new lines and the saved scenario the config exports. A silent `containers: null`
+would look exactly like a successful import.
+**Steps:** import fixture **F4**, which mixes one workload whose containers are named with one
+whose are not. Commit with **Replace workloads**. Then press **Export**, read the JSON, and paste
+it straight back through **Import** with `Replace configuration`.
+**Expect:** the dialog shows exactly one warning — `Containers in this export carry no names, so
+these workloads imported pod-level only: demo/legacy.` — and **two** notes: the existing
+point-in-time one (F4 has a single sample, so it carries no peak) and a new one naming
+`istio-proxy` among containers no pod spec declares. Both workloads still import: `demo/web` at
+**CPU request** `250` mCPU with a `500` mCPU limit, `demo/legacy` at `100` mCPU. `demo/web`'s
+**Average CPU usage / pod** reads `510` — the proxy's 210m counts toward the pod even though it
+has no container entry. In the exported JSON, `demo/web` carries a `containers` array whose `app`
+entry has `observed_cpu.avg: 300`, and `demo/legacy` carries `"containers": null`. The re-import
+returns to `0 changes` with the pill still `Live` — the field survives save/load, and the engine
+accepts it without a 422.
+**Origin:** P1.6 (Session F) · **Last verified:** 2026-08-20 (Session F)
+
+### R19 — A pod-level edit drops the breakdown it just contradicted
+**Pins:** the C2 resolution. Per-container detail has no readout, so a stale breakdown is
+invisible on screen — the exported scenario is the only place the contradiction shows. The bug
+this replaces: a workload edited from `250` to `500` mCPU exported `cpu_request_m: 500` beside a
+container entry still claiming `250`, with nothing able to say which was current.
+**Steps:** import fixture **F4** and commit with **Replace workloads**. Select `demo/web`, press
+**Export**, and confirm the `containers` array is there. Close, set **CPU request** to `500`,
+blur, and press **Export** again. Then Reset, re-import F4, and this time edit **Average CPU
+usage / pod** instead.
+**Expect:** before the edit `demo/web` carries its `app` breakdown; after either edit it carries
+`"containers": null`, while `resources.cpu_request_m` (or the usage summary) shows the new value.
+`demo/legacy` reads `"containers": null` throughout — it never had one. Editing a field that does
+not describe the pod's shape or load — **Current replicas**, the HPA fields, **Rollout max
+surge** — leaves the breakdown intact. No 422, and the pill stays `Live`.
+**Origin:** C2 resolution (Session F) · **Last verified:** 2026-08-20 (Session F; walked all
+three edits — CPU request 250 → 500 and average usage 510 → 900 both cleared it, replicas 2 → 5
+left it whole)
 
 ### R14 — A saved scenario round-trips
 **Pins:** save/load, including the surge unit mode, which is derived from the config rather
@@ -256,21 +294,42 @@ resolved there by showing both statements; the density and placement tiles were 
 that change.
 **Status:** open, needs owner sign-off before anything moves.
 
+### ~~C2 — An imported per-container breakdown survives pod-level edits and goes stale~~
+**RESOLVED 2026-08-20** (owner chose to drop the breakdown on a pod-level edit). Promoted to
+**R19** below; the behavior it questioned is gone. Original observation kept for the record:
+
+**Observed:** 2026-08-20 (Session F review, while shipping P1.6). Import F4, then change
+`demo/web`'s **CPU request** from `250` to `500` and press **Export**. The saved scenario reads
+`resources.cpu_request_m: 500` beside a `containers` array still saying `app` requests `250`.
+`Duplicate` clones the stale breakdown onto the new workload too.
+**Why it is not a wrong number:** the breakdown is a record of what the export said, and the
+editor is pod-level — it neither produces nor edits containers, so there is nothing for it to
+update them *to*. Nothing reads the breakdown today, so no result is affected.
+**The question:** what an editor that cannot express containers should do to a breakdown it
+cannot keep true. Null it on any `resources` or `observed_*` edit (simple, lossy, and consistent
+with "the editor is pod-level"), or keep it and mark its provenance. This becomes load-bearing
+the moment Phase 2's runtime-risk analysis reads the breakdown — which is what the
+`_evaluate_pool_scenario(pool, pods, workloads)` seam was opened for — because it will then read
+container numbers that contradict the pod totals with no marker saying which is stale.
+**Status:** ~~open~~ settled — see R19.
+
 ---
 
 ## Fixtures
 
-Paste as-is. F1 and F2 are `kcap-cluster-export` version 1 with no node or usage block, so the
-importer derives a single default pool. F3 is a saved kcap scenario, not an export.
+Paste as-is. F1, F2, and F4 are `kcap-cluster-export` version 1 with no node block, so the
+importer derives a single default pool. F3 is a saved kcap scenario, not an export. F1 and F2
+name their containers, as every real export does since P1.6 — a nameless one is a stale export
+script, which is what F4's second workload exists to show.
 
 ### F1 — Guaranteed pod with a native sidecar, absolute maxSurge
 
 ```json
 {"kind":"kcap-cluster-export","version":1,"nodes":null,"usage":null,"workloads":[
  {"kind":"Deployment","namespace":"demo","name":"web","replicas":3,"maxSurge":1,
-  "containers":[{"resources":{"requests":{"cpu":"500m","memory":"512Mi"},
-                              "limits":{"cpu":"500m","memory":"512Mi"}}}],
-  "initContainers":[{"restartPolicy":"Always",
+  "containers":[{"name":"app","resources":{"requests":{"cpu":"500m","memory":"512Mi"},
+                                           "limits":{"cpu":"500m","memory":"512Mi"}}}],
+  "initContainers":[{"name":"sidecar","restartPolicy":"Always",
                      "resources":{"requests":{"cpu":"100m","memory":"128Mi"},
                                   "limits":{"cpu":"100m","memory":"128Mi"}}}]}]}
 ```
@@ -280,9 +339,9 @@ importer derives a single default pool. F3 is a saved kcap scenario, not an expo
 ```json
 {"kind":"kcap-cluster-export","version":1,"nodes":null,"usage":null,"workloads":[
  {"kind":"Deployment","namespace":"demo","name":"web","replicas":2,
-  "containers":[{"resources":{"requests":{"cpu":"250m","memory":"256Mi"}}}]},
+  "containers":[{"name":"app","resources":{"requests":{"cpu":"250m","memory":"256Mi"}}}]},
  {"kind":"StatefulSet","namespace":"demo","name":"web","replicas":2,
-  "containers":[{"resources":{"requests":{"cpu":"250m","memory":"256Mi"}}}]}]}
+  "containers":[{"name":"app","resources":{"requests":{"cpu":"250m","memory":"256Mi"}}}]}]}
 ```
 
 ### F3 — A scenario from a version kcap no longer reads
@@ -306,4 +365,28 @@ downstream noticing the old field names.
  "node_pools":{"primary":{"name":"primary","machine":{"cpu_m":4000,"memory_mib":16384,
    "reserved_cpu_m":400,"reserved_memory_mib":1536,"max_pods":110},
   "min_nodes":1,"current_nodes":3,"max_nodes":10}}}}
+```
+
+### F4 — Named containers, an injected sidecar, and one workload from a stale export
+
+`demo/web` names its container and carries pod metrics for two containers, only one of which the
+spec declares. `demo/legacy` names nothing, as a script generated before P1.6 would have written
+it.
+
+```json
+{"kind":"kcap-cluster-export","version":1,"nodes":null,
+ "usage":{"window_seconds":0,
+  "pods":[{"namespace":"demo","name":"web-1","labels":{"app":"web"},"phase":"Running"}],
+  "samples":[[{"namespace":"demo","name":"web-1","containers":[
+    {"name":"app","usage":{"cpu":"300m","memory":"256Mi"}},
+    {"name":"istio-proxy","usage":{"cpu":"210m","memory":"64Mi"}}]}]]},
+ "workloads":[
+  {"kind":"Deployment","namespace":"demo","name":"web","replicas":2,
+   "selector":{"app":"web"},
+   "containers":[{"name":"app","resources":{"requests":{"cpu":"250m","memory":"256Mi"},
+                                            "limits":{"cpu":"500m","memory":"512Mi"}}}],
+   "initContainers":[]},
+  {"kind":"Deployment","namespace":"demo","name":"legacy","replicas":1,
+   "containers":[{"resources":{"requests":{"cpu":"100m","memory":"128Mi"}}}],
+   "initContainers":[]}]}
 ```

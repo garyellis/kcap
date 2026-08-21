@@ -106,6 +106,35 @@ maximum, which is a larger number describing a moment where every pod peaked tog
 never derived; these sample counts cannot support one.
 `importers.ts` `observedUsage`, `buildExportScript` ⇄ [`PodMetrics`](https://github.com/kubernetes/kubernetes/blob/v1.33.0/staging/src/k8s.io/metrics/pkg/apis/metrics/v1beta1/types.go#L66)
 
+**Per-container usage.** The same figures are also kept per container, joined to the pod spec by
+`ContainerMetrics.Name` and read on the identical rule — a container's peak is the highest
+per-container average any *one* sample showed — so the two levels cannot mean different things by
+"peak". Every series divides by the same pod count the pod-level figure uses, which makes a
+container average that container's share of the pod average. The breakdown covers the
+always-running set only (regular containers plus restartPolicy-Always init containers): a plain
+init container has exited before the steady state this describes. A reading whose name no spec
+declares — an injected sidecar — is named in an import note rather than folded into a container it
+does not belong to, and its usage still counts toward the pod figure, since that is what it is.
+Two departures worth knowing before reading a container number. A container that reported nothing
+in a sample counts as **zero** for that sample, where a *pod* that reported nothing has its sample
+dropped instead. The asymmetry is deliberate and load-bearing: dropping absent samples would leave
+a sidecar injected partway through a three-sample window with a one-element series, and a single
+sample carries no peak — so the reading entitlement analysis actually consumes would be destroyed
+to protect one it does not. What zero-filling depresses is the container *average* (a sidecar that
+ran for the last third of the window reads 20m against the 60m it used while running); the peak
+stays the highest per-container average any one sample showed, which is what `exposure()` reads.
+And the
+breakdown describes one import and only that: kcap's editor is pod-level, so a hand edit to the
+pod's requests, limits, or observed usage **drops** the breakdown rather than carrying a list that
+contradicts the pod. Staleness cannot be detected later — a breakdown that does not sum to the pod
+totals is the normal case, since the pod numbers are effective requests — so it is caught at the
+edit or not at all, and analysis falls back to the pod level, exactly as it does for the hand-built
+workloads that never had one.
+The breakdown is analysis-only and optional: nothing in placement, HPA math, or node counts reads
+it (it does surface in `/v1/compare`'s configuration diff, which reports every changed input), and
+it is absent for any workload configured in kcap's own editor.
+`importers.ts` `observedUsage`, `containerBreakdown`, `engine.py` `ContainerInfo` ⇄ [`ContainerMetrics`](https://github.com/kubernetes/kubernetes/blob/v1.33.0/staging/src/k8s.io/metrics/pkg/apis/metrics/v1beta1/types.go#L97)
+
 **Usage under scaling.** Observed per-pod usage is held constant across all five scenarios,
 though in reality adding replicas divides the same work across more pods and per-pod usage falls.
 The HPA scenarios show the shape of a response, not a converged steady state.
