@@ -18,11 +18,14 @@ node = "24"
 # same commit as a failed `npm ci` in the image build — or, worse, an image whose
 # `uv sync --frozen` quietly installed the stale lock. Drift must fail here.
 # Add dependencies deliberately: `uv add <pkg>` / `npm install <pkg> --prefix frontend`.
+# The browser download obeys the same rule: `playwright install` fetches exactly the
+# build that the locked `@playwright/test` version expects, and is a no-op once present.
 [tasks.setup]
 description = "Install backend and frontend dependencies from the lockfiles."
 run = """
 uv sync --locked
 npm --prefix frontend ci
+npm --prefix frontend exec -- playwright install --with-deps chromium
 """
 
 [tasks.test]
@@ -48,6 +51,23 @@ cd frontend
 habit-hooks --config ../.habit-hooks/frontend.toml
 """
 
+# Builds the production bundle, then serves it through uvicorn on a private port
+# (see `frontend/playwright.config.ts`), so the suite can never pass against a
+# stale `dist` or against whatever is holding port 8100. The build runs here
+# rather than inside Playwright's `webServer` so that a TypeScript or Vite error
+# is a readable failure instead of a server start-up timeout. `VITE_API_BASE_URL`
+# is cleared so a developer's local `frontend/.env` cannot point the built bundle
+# at a different backend.
+#
+# `npm run` (not `npm exec`) because only `run` changes directory into
+# `frontend/`, where `playwright.config.ts` lives.
+[tasks.e2e]
+description = "Run the Playwright end-to-end suite for the promoted UI regression scenarios."
+run = """
+VITE_API_BASE_URL= npm --prefix frontend run build
+npm --prefix frontend run e2e
+"""
+
 [tasks.api-contract]
 description = "Confirm generated frontend API types match FastAPI's OpenAPI schema."
 run = "scripts/check-api-contract.sh"
@@ -57,16 +77,20 @@ description = "Scan both dependency lockfiles for known vulnerabilities."
 run = "osv-scanner scan source --recursive ."
 
 [tasks.check]
-description = "Run all tests, quality, architecture, contract, and security gates."
+description = "Run all tests, quality, architecture, contract, security, and browser gates."
+# `e2e` runs last, and covers the production-build gate: it builds `frontend/dist`
+# itself, so a separate `npm run build` here would only build the same bundle
+# twice. It is also the slowest and most environment-dependent step, so every
+# cheap deterministic gate gets to fail first.
 run = """
 mise run python-quality
 uv run pytest
 npm --prefix frontend run quality
 npm --prefix frontend run test
-npm --prefix frontend run build
 mise run habit-hooks
 mise run api-contract
 mise run security
+mise run e2e
 """
 
 [tasks.serve]

@@ -263,6 +263,10 @@ export function ImportModal({
         <div className="import-step-head"><span className="chip">Step 2</span><h3>Paste or upload the export</h3></div>
         <textarea
           className="import-text"
+          // The heading above it is the only thing naming this box, and a heading is
+          // not a label — the control announced nothing. Naming it also gives the
+          // end-to-end suite a real `getByLabel` handle instead of a placeholder match.
+          aria-label="Paste or upload the export"
           value={text}
           placeholder="Paste kcap-export.json or a kcap scenario here…"
           spellCheck={false}

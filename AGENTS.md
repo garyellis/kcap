@@ -27,10 +27,13 @@ Keep assumptions visible. Never present an approximation as Kubernetes parity.
   `core-does-not-import-ui` rule in `frontend/dependency-cruiser.config.mjs`
   enforces this list.
 - `frontend/src/generated/` comes from FastAPI OpenAPI; never hand-edit it.
+- `frontend/e2e/` is the Playwright suite for scenarios promoted out of
+  `docs/ui-regression-scenarios.md`. It drives the built UI from outside and imports
+  nothing from `src/`; `frontend/e2e/support/kcap.ts` states its selector policy.
 - The production image builds Vite and serves it through FastAPI on port 8100.
 
 Stack: Python 3.13, uv, FastAPI, Pydantic, pytest, React, TypeScript, Vite, Vitest,
-Docker, and mise. Tool pins: `.python-version` and `.mise.toml`; tasks: `.mise.toml`;
+Playwright, Docker, and mise. Tool pins: `.python-version` and `.mise.toml`; tasks: `.mise.toml`;
 dependencies: `pyproject.toml` and `frontend/package.json`.
 
 ## Kubernetes behavior
@@ -83,10 +86,17 @@ Use mise for repository tasks.
 - After code changes, run the smallest relevant tests and `mise run habit-hooks`.
 - Before handing off code, configuration, or dependency changes, run
   `mise run check`; it covers all tests, quality/architecture gates, Habit Hooks,
-  the OpenAPI contract, production build, and security scans.
+  the OpenAPI contract, security scans, and — last, because it is slowest and
+  builds the production bundle on the way — the Playwright browser suite.
 - Fix change-caused failures. If another failure remains, report its command and
   relevant output; do not claim full verification.
-- `docs/ui-regression-scenarios.md` is the manual browser checklist for readouts a
-  green suite cannot prove. Changing UI behavior means walking the affected
-  scenarios and adding one for the behavior in the same change; a scenario is
-  marked verified only on the date someone actually ran it.
+- `docs/ui-regression-scenarios.md` is the browser checklist for readouts a green
+  suite cannot prove. Changing UI behavior means walking the affected scenarios and
+  adding one for the behavior in the same change; a scenario is marked verified only
+  on the date someone actually ran it. It also means **promoting** a scenario to
+  `frontend/e2e/` once its expectation is settled — normally the session after the one
+  that wrote it, so the manual walk still happens where judgment is needed. Promotion
+  guards a settled decision against rot; it never replaces the walk, and a scenario
+  whose expectation nobody has decided is never promoted. The checklist's "Promotion"
+  section holds the rules; `mise run e2e` runs the promoted suite, and `mise run check`
+  includes it.

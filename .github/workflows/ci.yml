@@ -33,6 +33,9 @@ jobs:
           path: |
             ~/.cache/uv
             ~/.npm
+            # Playwright's browser build is chosen by the locked @playwright/test
+            # version, so the lockfile hash below is already the right cache key.
+            ~/.cache/ms-playwright
           key: deps-${{ runner.os }}-${{ hashFiles('uv.lock', 'frontend/package-lock.json') }}
           restore-keys: deps-${{ runner.os }}-
 

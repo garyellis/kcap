@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useId, useMemo, useState } from 'react'
 import type { ReactNode } from 'react'
 import './App.css'
 import { compareClusters } from './api'
@@ -503,6 +503,7 @@ function ResultsPanel({
 }) {
   const scenario = comparison?.candidate_result.scenarios[scenarioName]
   const baselineScenario = comparison?.baseline_result.scenarios[scenarioName]
+  const caActionLabelId = useId()
 
   const poolNames = Object.keys(candidate.node_pools)
   const multiPool = poolNames.length > 1
@@ -616,7 +617,14 @@ function ResultsPanel({
                   ? `${poolScenario.oversized_pod_count} pod${poolScenario.oversized_pod_count === 1 ? '' : 's'} request more than one whole node. No node count places them.`
                   : 'A placement constraint exceeds the configured envelope.'}</p>
             </div>
-            <div className="verdict-action"><span>CA action</span><b className={actionClass}>{action}</b><small>{actionNote}</small></div>
+            {/* A labelled group, so the reading (`−3`, `nodes`) has a boundary a
+                screen reader announces on entry instead of three loose strings after
+                the verdict paragraph. `aria-labelledby` reuses the visible label, so
+                the name can never drift from what is on screen — and it gives the
+                end-to-end suite a way to address this tile without a test-id. */}
+            <div className="verdict-action" role="group" aria-labelledby={caActionLabelId}>
+              <span id={caActionLabelId}>CA action</span><b className={actionClass}>{action}</b><small>{actionNote}</small>
+            </div>
           </section>
 
           <div className="metric-grid">

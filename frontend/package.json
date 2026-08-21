@@ -7,15 +7,17 @@
     "dev": "vite",
     "build": "tsc -b && vite build",
     "typecheck": "tsc -b --pretty false",
+    "typecheck:e2e": "tsc -p tsconfig.e2e.json",
     "lint": "oxlint --deny-warnings",
     "lint:eslint": "eslint .",
     "dead-code": "knip --no-config-hints",
-    "architecture": "dependency-cruise --config dependency-cruiser.config.mjs src vite.config.ts",
+    "architecture": "dependency-cruise --config dependency-cruiser.config.mjs src e2e playwright.config.ts vite.config.ts",
     "habit-hooks": "habit-hooks --config ../.habit-hooks/frontend.toml",
     "openapi:generate": "openapi-ts",
-    "quality": "npm run lint && npm run lint:eslint && npm run typecheck && npm run dead-code && npm run architecture",
+    "quality": "npm run lint && npm run lint:eslint && npm run typecheck && npm run typecheck:e2e && npm run dead-code && npm run architecture",
     "preview": "vite preview",
-    "test": "vitest run"
+    "test": "vitest run",
+    "e2e": "playwright test"
   },
   "dependencies": {
     "react": "^19.2.8",
@@ -26,6 +28,7 @@
   },
   "devDependencies": {
     "@hey-api/openapi-ts": "0.99.0",
+    "@playwright/test": "1.62.1",
     "@types/node": "^24.13.3",
     "@types/react": "^19.2.17",
     "@types/react-dom": "^19.2.3",

@@ -1,0 +1,35 @@
+{
+  // The end-to-end suite is deliberately NOT a reference of `tsconfig.json`.
+  // `npm run build` (`tsc -b && vite build`) also runs inside the production image,
+  // where `.dockerignore` keeps `e2e/` out of the build context — a project
+  // reference would make the image build fail looking for files that are not there.
+  // `npm run typecheck:e2e` is wired into `npm run quality` instead, so the suite
+  // is type-checked with the same strictness as the app.
+  "compilerOptions": {
+    // No `tsBuildInfoFile`: this project is neither `composite` nor `incremental`
+    // and runs under a plain `tsc -p`, so the setting would imply caching that
+    // does not happen. The suite is small enough to type-check cold.
+    "target": "es2023",
+    // No `DOM`: these tests talk to the page through Playwright locators, never
+    // through `document`. Leaving the DOM lib out makes that a compile error
+    // rather than a code-review note.
+    "lib": ["ES2023"],
+    "types": ["node"],
+    "strict": true,
+    "skipLibCheck": true,
+
+    /* Bundler mode */
+    "module": "esnext",
+    "moduleResolution": "bundler",
+    "verbatimModuleSyntax": true,
+    "moduleDetection": "force",
+    "noEmit": true,
+
+    /* Linting */
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
+    "erasableSyntaxOnly": true,
+    "noFallthroughCasesInSwitch": true
+  },
+  "include": ["e2e", "playwright.config.ts"]
+}

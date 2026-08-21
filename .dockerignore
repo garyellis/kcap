@@ -10,6 +10,15 @@ dist
 frontend/node_modules
 frontend/dist
 frontend/.vite
+# The end-to-end suite drives the built image's UI from outside; shipping it into
+# the build context would only invalidate the frontend build layer on every spec
+# edit. `tsconfig.e2e.json` is deliberately not a `tsc -b` reference, so the
+# image's `npm run build` never looks for these files.
+frontend/e2e
+frontend/playwright.config.ts
+playwright-report
+test-results
+blob-report
 *.log
 .env
 .env.*
