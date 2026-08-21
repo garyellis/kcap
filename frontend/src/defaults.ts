@@ -11,8 +11,8 @@ export const BASELINE: ClusterConfig = {
         memory_limit_mib: 2048,
       },
       current_replicas: 6,
-      observed_cpu_per_pod_m: 620,
-      observed_memory_per_pod_mib: 780,
+      observed_cpu_per_pod: { avg: 620, p95: null, peak: null },
+      observed_memory_per_pod: { avg: 780, p95: null, peak: null },
       hpa: {
         min_replicas: 3,
         max_replicas: 18,
@@ -31,8 +31,8 @@ export const BASELINE: ClusterConfig = {
         memory_limit_mib: 1536,
       },
       current_replicas: 4,
-      observed_cpu_per_pod_m: 310,
-      observed_memory_per_pod_mib: 520,
+      observed_cpu_per_pod: { avg: 310, p95: null, peak: null },
+      observed_memory_per_pod: { avg: 520, p95: null, peak: null },
       hpa: {
         min_replicas: 2,
         max_replicas: 12,
@@ -74,8 +74,8 @@ export function createWorkload(name: string, pool: string): Workload {
       memory_limit_mib: 512,
     },
     current_replicas: 2,
-    observed_cpu_per_pod_m: 150,
-    observed_memory_per_pod_mib: 192,
+    observed_cpu_per_pod: { avg: 150, p95: null, peak: null },
+    observed_memory_per_pod: { avg: 192, p95: null, peak: null },
     hpa: {
       min_replicas: 1,
       max_replicas: 8,

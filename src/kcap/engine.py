@@ -168,14 +168,10 @@ class WorkloadResult:
     rollout_replicas_at_max: int
 
     @property
-    def hpa_saturated(self) -> bool:
-        return self.raw_desired_replicas != self.desired_replicas
-
-    @property
     def clamped_by(self) -> Literal["min", "max"] | None:
         """Which end of the HPA range held the recommendation, if either.
 
-        `hpa_saturated` says only that a clamp happened; the direction decides
+        Null means the metric recommendation stood; the direction decides
         whether the operator raises a ceiling or lowers a floor.
         """
         if self.raw_desired_replicas < self.desired_replicas:
@@ -1472,8 +1468,3 @@ def compare_results(
         )
 
     return ClusterDiff(workloads=workload_diffs, scenarios=scenario_diffs)
-
-
-def compare(before: ClusterResult, after: ClusterResult) -> ClusterDiff:
-    """Backward-compatible alias for compare_results."""
-    return compare_results(before, after)

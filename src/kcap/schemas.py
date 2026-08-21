@@ -2,7 +2,7 @@
 
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field
 
 from . import engine
 
@@ -111,13 +111,6 @@ class UsageStatSchema(ApiModel):
         return engine.UsageStat(**self.model_dump())
 
 
-# Pre-distribution scalar usage fields, mapped to the field that replaced each.
-_LEGACY_USAGE_FIELDS = {
-    "observed_cpu_per_pod_m": "observed_cpu_per_pod",
-    "observed_memory_per_pod_mib": "observed_memory_per_pod",
-}
-
-
 class WorkloadSchema(ApiModel):
     name: str = Field(min_length=1)
     resources: ResourcesSchema
@@ -146,29 +139,6 @@ class WorkloadSchema(ApiModel):
             "'metrics-server-snapshot' or 'manual'."
         ),
     )
-    # Declared so the deprecation is visible in the OpenAPI schema and the
-    # generated client types. _accept_legacy_usage consumes them before field
-    # validation, so a validated model always carries None here.
-    observed_cpu_per_pod_m: int | None = Field(
-        default=None,
-        deprecated=True,
-        description=(
-            "Deprecated: send observed_cpu_per_pod.avg instead. A scalar was "
-            "always an average, so it is accepted and normalized into "
-            "observed_cpu_per_pod, which is where it is validated and where "
-            "any error names it; responses never carry it."
-        ),
-    )
-    observed_memory_per_pod_mib: int | None = Field(
-        default=None,
-        deprecated=True,
-        description=(
-            "Deprecated: send observed_memory_per_pod.avg instead. A scalar "
-            "was always an average, so it is accepted and normalized into "
-            "observed_memory_per_pod, which is where it is validated and "
-            "where any error names it; responses never carry it."
-        ),
-    )
     hpa: HpaSchema | None = None
     rollout: RolloutSchema = Field(default_factory=RolloutSchema)
     pool: str | None = Field(
@@ -179,36 +149,6 @@ class WorkloadSchema(ApiModel):
             "the cluster has a single pool."
         ),
     )
-
-    @model_validator(mode="before")
-    @classmethod
-    def _accept_legacy_usage(_cls, data: Any) -> Any:
-        """Normalize the pre-distribution scalar usage fields into statistics.
-
-        A scalar observed value was always an average, so it becomes
-        `{"avg": value}`. Runs before field validation, and refuses both forms
-        for one dimension, on the _accept_legacy_node_pool precedent.
-
-        Two forms means two *values*, not two keys: unlike the legacy
-        node_pool, both usage fields are declared and nullable, and a client
-        that names every field it knows sends the one it does not use as null.
-        """
-        if not isinstance(data, dict):
-            return data
-        legacy_keys = [key for key in _LEGACY_USAGE_FIELDS if key in data]
-        if not legacy_keys:
-            return data
-
-        data = dict(data)
-        for legacy in legacy_keys:
-            current = _LEGACY_USAGE_FIELDS[legacy]
-            value = data.pop(legacy)
-            if value is None:
-                continue
-            if data.get(current) is not None:
-                raise ValueError(f"Provide {current} or the legacy {legacy}, not both")
-            data[current] = {"avg": value}
-        return data
 
     def to_domain(self) -> engine.Workload:
         return engine.Workload(
@@ -292,27 +232,6 @@ class ClusterConfigSchema(ApiModel):
         description="Node pools keyed by their unique name.",
     )
 
-    @model_validator(mode="before")
-    @classmethod
-    def _accept_legacy_node_pool(_cls, data: Any) -> Any:
-        """Normalize the pre-multi-pool `node_pool` key into `node_pools`.
-
-        Runs before field validation because extra="forbid" would otherwise
-        reject the legacy key outright.
-        """
-        if not isinstance(data, dict) or "node_pool" not in data:
-            return data
-        if "node_pools" in data:
-            raise ValueError("Provide node_pools or the legacy node_pool, not both")
-
-        data = dict(data)
-        pool = data.pop("node_pool")
-        name = pool.get("name") if isinstance(pool, dict) else None
-        if not isinstance(name, str) or not name:
-            raise ValueError("node_pool.name is required")
-        data["node_pools"] = {name: pool}
-        return data
-
     def to_domain(self) -> engine.ClusterConfig:
         return engine.ClusterConfig(
             workloads={
@@ -331,7 +250,6 @@ class WorkloadResultSchema(ApiModel):
     current_replicas: int
     raw_desired_replicas: int
     desired_replicas: int
-    hpa_saturated: bool
     clamped_by: Literal["min", "max"] | None = Field(
         default=None,
         description=(

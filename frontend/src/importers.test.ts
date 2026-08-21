@@ -31,8 +31,8 @@ function config(overrides: Partial<ClusterConfig> = {}): ClusterConfig {
         name: 'api',
         resources: { cpu_request_m: 500, memory_request_mib: 512, cpu_limit_m: null, memory_limit_mib: null },
         current_replicas: 2,
-        observed_cpu_per_pod_m: null,
-        observed_memory_per_pod_mib: null,
+        observed_cpu_per_pod: null,
+        observed_memory_per_pod: null,
         hpa: null,
         rollout: { max_surge_percent: 25 },
         pool: null,
@@ -221,8 +221,8 @@ describe('transformClusterExport', () => {
     expect(workload.name).toBe('demo/web')
     expect(workload.resources).toEqual({ cpu_request_m: 250, memory_request_mib: 256, cpu_limit_m: 500, memory_limit_mib: 512 })
     expect(workload.current_replicas).toBe(4)
-    expect(workload.observed_cpu_per_pod_m).toBeNull()
-    expect(workload.observed_memory_per_pod_mib).toBeNull()
+    expect(workload.observed_cpu_per_pod).toBeNull()
+    expect(workload.observed_memory_per_pod).toBeNull()
   })
 
   it('nullifies a limit when any container lacks it', () => {
@@ -482,21 +482,57 @@ describe('transformClusterExport', () => {
         { namespace: 'demo', name: 'web-1', labels: { app: 'web', 'pod-template-hash': 'abc' }, phase: 'Running' },
         { namespace: 'demo', name: 'web-2', labels: { app: 'web', 'pod-template-hash': 'abc' }, phase: 'Running' },
       ],
-      metrics: [
+      samples: [[
         {
           namespace: 'demo',
           name: 'web-1',
           containers: [{ usage: { cpu: '100m', memory: '131072Ki' } }, { usage: { cpu: '50000000n', memory: '64Mi' } }],
         },
         { namespace: 'demo', name: 'web-2', containers: [{ usage: { cpu: '250000000n', memory: '1Gi' } }] },
-      ],
+      ]],
     }
     const data = clusterExport([deployment({ selector: { app: 'web' } })], null, usage)
     const workload = transformClusterExport(data).workloads['demo/web']
     // web-1 sums to 150m / 192Mi, web-2 to 250m / 1024Mi -> averages below.
-    expect(workload.observed_cpu_per_pod_m).toBe(200)
-    expect(workload.observed_memory_per_pod_mib).toBe(608)
+    // One capture, so there is no peak and the window is a point in time.
+    expect(workload.observed_cpu_per_pod).toEqual({ avg: 200, p95: null, peak: null })
+    expect(workload.observed_memory_per_pod).toEqual({ avg: 608, p95: null, peak: null })
+    expect(workload.usage_source).toBe('metrics-server-snapshot')
+    expect(workload.usage_window_seconds).toBe(0)
     expect(transformClusterExport(data).notes.join(' ')).not.toContain('hold current replicas')
+  })
+
+  it('summarizes a sampled export as an average and a peak across samples', () => {
+    // Two pods whose busiest moments are different samples. That is what
+    // separates the two candidate readings of "peak":
+    //   max over samples of the per-pod average  -> 400m / 704 MiB (kcap's)
+    //   average of each pod's own maximum        -> 650m / 1152 MiB
+    // The first is a number the fleet actually showed at one instant; the
+    // second assumes both pods peaked together and describes no real moment.
+    const sample = (web1: string, web2: string, memory1: string, memory2: string) => [
+      { namespace: 'demo', name: 'web-1', containers: [{ usage: { cpu: web1, memory: memory1 } }] },
+      { namespace: 'demo', name: 'web-2', containers: [{ usage: { cpu: web2, memory: memory2 } }] },
+    ]
+    const usage: ExportedUsage = {
+      pods: [
+        { namespace: 'demo', name: 'web-1', labels: { app: 'web' }, phase: 'Running' },
+        { namespace: 'demo', name: 'web-2', labels: { app: 'web' }, phase: 'Running' },
+      ],
+      samples: [
+        sample('100m', '200m', '128Mi', '256Mi'), // per-pod average 150m / 192 MiB
+        sample('600m', '100m', '1024Mi', '128Mi'), // 350m / 576 MiB
+        sample('100m', '700m', '128Mi', '1280Mi'), // 400m / 704 MiB
+      ],
+      window_seconds: 60,
+    }
+    const data = clusterExport([deployment({ selector: { app: 'web' } })], null, usage)
+    const result = transformClusterExport(data)
+    const workload = result.workloads['demo/web']
+    expect(workload.observed_cpu_per_pod).toEqual({ avg: 300, p95: null, peak: 400 })
+    expect(workload.observed_memory_per_pod).toEqual({ avg: 491, p95: null, peak: 704 })
+    expect(workload.usage_source).toBe('metrics-server-samples')
+    expect(workload.usage_window_seconds).toBe(60)
+    expect(result.notes.join(' ')).toContain('3 samples over 60s')
   })
 
   it('attributes pods by selector and namespace, skipping non-running pods', () => {
@@ -507,34 +543,35 @@ describe('transformClusterExport', () => {
         { namespace: 'demo', name: 'other-1', labels: { app: 'other' }, phase: 'Running' },
         { namespace: 'prod', name: 'web-1', labels: { app: 'web' }, phase: 'Running' },
       ],
-      metrics: [
+      samples: [[
         { namespace: 'demo', name: 'web-1', containers: [{ usage: { cpu: '100m', memory: '128Mi' } }] },
         { namespace: 'demo', name: 'web-2', containers: [{ usage: { cpu: '900m', memory: '900Mi' } }] },
         { namespace: 'demo', name: 'other-1', containers: [{ usage: { cpu: '300m', memory: '256Mi' } }] },
         { namespace: 'prod', name: 'web-1', containers: [{ usage: { cpu: '900m', memory: '900Mi' } }] },
-      ],
+      ]],
     }
     const items = [
       deployment({ selector: { app: 'web' } }),
       deployment({ name: 'other', selector: { app: 'other' } }),
     ]
     const result = transformClusterExport(clusterExport(items, null, usage))
-    expect(result.workloads['demo/web'].observed_cpu_per_pod_m).toBe(100)
-    expect(result.workloads['demo/web'].observed_memory_per_pod_mib).toBe(128)
-    expect(result.workloads['demo/other'].observed_cpu_per_pod_m).toBe(300)
-    expect(result.workloads['demo/other'].observed_memory_per_pod_mib).toBe(256)
+    expect(result.workloads['demo/web'].observed_cpu_per_pod?.avg).toBe(100)
+    expect(result.workloads['demo/web'].observed_memory_per_pod?.avg).toBe(128)
+    expect(result.workloads['demo/other'].observed_cpu_per_pod?.avg).toBe(300)
+    expect(result.workloads['demo/other'].observed_memory_per_pod?.avg).toBe(256)
   })
 
   it('keeps observed usage null when no pod matches or the selector is absent', () => {
     const usage: ExportedUsage = {
       pods: [{ namespace: 'demo', name: 'other-1', labels: { app: 'other' }, phase: 'Running' }],
-      metrics: [{ namespace: 'demo', name: 'other-1', containers: [{ usage: { cpu: '300m', memory: '256Mi' } }] }],
+      samples: [[{ namespace: 'demo', name: 'other-1', containers: [{ usage: { cpu: '300m', memory: '256Mi' } }] }]],
     }
     const items = [deployment({ selector: { app: 'web' } }), deployment({ name: 'bare', selector: null })]
     const result = transformClusterExport(clusterExport(items, null, usage))
     for (const name of ['demo/web', 'demo/bare']) {
-      expect(result.workloads[name].observed_cpu_per_pod_m).toBeNull()
-      expect(result.workloads[name].observed_memory_per_pod_mib).toBeNull()
+      expect(result.workloads[name].observed_cpu_per_pod).toBeNull()
+      expect(result.workloads[name].observed_memory_per_pod).toBeNull()
+      expect(result.workloads[name].usage_source).toBeNull()
     }
   })
 
@@ -550,21 +587,22 @@ describe('transformClusterExport', () => {
       targetCPUUtilizationPercentage: null,
     }
     const result = transformClusterExport(clusterExport([deployment({ selector: { app: 'web' } }), hpa]))
-    expect(result.workloads['demo/web'].observed_cpu_per_pod_m).toBeNull()
-    expect(result.workloads['demo/web'].observed_memory_per_pod_mib).toBeNull()
+    expect(result.workloads['demo/web'].observed_cpu_per_pod).toBeNull()
+    expect(result.workloads['demo/web'].observed_memory_per_pod).toBeNull()
     const notes = result.notes.join(' ')
     expect(notes).toContain('hold current replicas')
     expect(notes).not.toContain('not part of a cluster export')
   })
 
-  it('imports an old export without the usage field cleanly, with nulls', () => {
-    const old = { kind: 'kcap-cluster-export', version: 1, workloads: [deployment()], nodes: null }
-    const parsed = parseImport(JSON.stringify(old))
+  it('imports an export with no usage block cleanly, with nulls', () => {
+    // A cluster with no metrics-server, or an exporter without permission.
+    const unmetered = { kind: 'kcap-cluster-export', version: 1, workloads: [deployment()], nodes: null }
+    const parsed = parseImport(JSON.stringify(unmetered))
     expect(parsed.kind).toBe('cluster')
     if (parsed.kind !== 'cluster') return
     const workload = transformClusterExport(parsed.data).workloads['demo/web']
-    expect(workload.observed_cpu_per_pod_m).toBeNull()
-    expect(workload.observed_memory_per_pod_mib).toBeNull()
+    expect(workload.observed_cpu_per_pod).toBeNull()
+    expect(workload.observed_memory_per_pod).toBeNull()
   })
 
   it('groups workloads by identical nodeSelector with a stable key', () => {
@@ -714,22 +752,15 @@ describe('parseImport', () => {
     expect(parsed).toEqual({ kind: 'scenario', config: original })
   })
 
-  it('accepts a bare config with the legacy node_pool key', () => {
-    const legacy = {
-      workloads: config().workloads,
-      node_pool: config().node_pools.primary,
-    }
-    const parsed = parseImport(JSON.stringify(legacy))
-    expect(parsed.kind).toBe('scenario')
-    if (parsed.kind === 'scenario') {
-      expect(Object.keys(parsed.config.node_pools)).toEqual(['primary'])
-    }
-  })
-
-  it('rejects a config carrying both pool keys', () => {
-    const both = { workloads: config().workloads, node_pool: config().node_pools.primary, node_pools: config().node_pools }
-    const parsed = parseImport(JSON.stringify(both))
-    expect(parsed).toEqual({ kind: 'error', message: 'Provide node_pools or the legacy node_pool, not both.' })
+  it('rejects a bare config that carries no kind', () => {
+    // A document must declare what it is; there is no pre-envelope form.
+    const bare = { workloads: config().workloads, node_pools: config().node_pools }
+    const parsed = parseImport(JSON.stringify(bare))
+    expect(parsed.kind).toBe('error')
+    if (parsed.kind !== 'error') return
+    expect(parsed.message).toContain('Unrecognized document')
+    expect(parsed.message).toContain('kcap-scenario')
+    expect(parsed.message).toContain('kcap-cluster-export')
   })
 
   it('detects cluster exports and rejects unknown versions', () => {
@@ -766,15 +797,37 @@ describe('parseImport', () => {
     expect(parsed.config).toEqual(original)
   })
 
-  it('loads a scenario saved before max_surge_pods existed, in percent mode', () => {
-    // config() carries the pre-change rollout shape: the key is simply absent.
-    const legacy = parseImport(JSON.stringify(serializeScenario(config())))
-    expect(legacy.kind).toBe('scenario')
-    if (legacy.kind !== 'scenario') return
-    const rollout = legacy.config.workloads.api.rollout
+  it('reads an omitted max_surge_pods as percent mode', () => {
+    // max_surge_pods is optional, and the shipped defaults omit it, so a file
+    // saved right now can legitimately arrive without the key.
+    const saved = parseImport(JSON.stringify(serializeScenario(config())))
+    expect(saved.kind).toBe('scenario')
+    if (saved.kind !== 'scenario') return
+    const rollout = saved.config.workloads.api.rollout
     expect(rollout.max_surge_percent).toBe(25)
     expect(rollout.max_surge_pods).toBeUndefined()
     expect(surgeUnitOf(rollout)).toBe('%')
+  })
+
+  it('rejects every scenario version but the current one (E26)', () => {
+    // This branch used to accept any version, so a file from a later kcap was
+    // read with today's rules instead of refused. v2 — the scalar observed-usage
+    // shape — is now refused too rather than upgraded on load.
+    for (const version of [999, 2, 1, 'three', undefined]) {
+      const parsed = parseImport(JSON.stringify({ kind: 'kcap-scenario', version, config: config() }))
+      expect(parsed.kind).toBe('error')
+      if (parsed.kind === 'error') expect(parsed.message).toContain('expected 3')
+    }
+    expect(parseImport(JSON.stringify(serializeScenario(config()))).kind).toBe('scenario')
+    expect(serializeScenario(config()).version).toBe(3)
+  })
+
+  it('rejects a scenario envelope whose config has no node pools', () => {
+    const envelope = { ...serializeScenario(config()), config: { workloads: config().workloads } }
+    expect(parseImport(JSON.stringify(envelope))).toEqual({
+      kind: 'error',
+      message: 'Scenario config has no node pools.',
+    })
   })
 
   it('produces specific errors for empty, invalid, and unrecognized input', () => {
@@ -824,27 +877,59 @@ describe('buildExportScript', () => {
       expect(script).toContain('SKIP_ZERO_REPLICAS=0 keeps them')
     }
   })
+
+  it('bakes the sampling variables, off by default', () => {
+    // Gate G3: sampling is opt-in, so a default export takes exactly as long as
+    // it did before and carries no peak.
+    const script = buildExportScript('', '')
+    expect(script).toContain('\nUSAGE_SAMPLES=1\n')
+    expect(script).toContain('\nUSAGE_INTERVAL_SECONDS=30\n')
+    expect(script).toContain('while [ "$captured" -lt "$USAGE_SAMPLES" ]; do')
+    // The version stays 1 — the usage block gains optional keys instead.
+    expect(script).toContain('version: 1')
+  })
 })
 
 // ---------------------------------------------------------------------------
 // Export script execution against a stub kubectl. The shim serves raw
-// Kubernetes-shaped JSON (the projections run on it) and denies auth can-i so
-// the node and pod-metrics branches stay quiet. Requires bash and jq, exactly
-// as the script itself does.
+// Kubernetes-shaped JSON (the projections run on it). Without KCAP_METRICS_DIR
+// it denies every auth can-i, so the node and pod-metrics branches stay quiet;
+// with it, pod access is allowed (node access never is) and each
+// pods.metrics.k8s.io call is served the next sample file in order, which is
+// how a multi-sample capture is exercised without a cluster. Requires bash and
+// jq, exactly as the script itself does.
 // ---------------------------------------------------------------------------
 
 const KUBECTL_SHIM = `#!/usr/bin/env bash
 case "$1" in
   config) echo "stub-context" ;;
-  auth) exit 1 ;;
-  get) cat "$KCAP_FIXTURE" ;;
+  auth)
+    if [ -z "\${KCAP_METRICS_DIR:-}" ]; then exit 1; fi
+    # "kubectl auth can-i list <resource>": $4 is the resource.
+    case "$4" in nodes) exit 1 ;; *) exit 0 ;; esac
+    ;;
+  get)
+    case "$2" in
+      pods.metrics.k8s.io)
+        served=$(cat "$KCAP_METRICS_DIR/served")
+        served=$((served + 1))
+        echo "$served" > "$KCAP_METRICS_DIR/served"
+        cat "$KCAP_METRICS_DIR/sample-$served.json"
+        ;;
+      pods) cat "$KCAP_METRICS_DIR/pods.json" ;;
+      *) cat "$KCAP_FIXTURE" ;;
+    esac
+    ;;
   *) exit 1 ;;
 esac
 `
 
 type ScriptRun = { doc: ClusterExport; stderr: string }
+// Raw Kubernetes-shaped metrics: one PodMetrics list per sample, plus the pod
+// listing the importer joins them to.
+type MetricsFixture = { samples: unknown[][]; pods: unknown[] }
 
-function runExportScript(script: string, items: unknown[]): ScriptRun {
+function runExportScript(script: string, items: unknown[], metrics?: MetricsFixture): ScriptRun {
   const dir = mkdtempSync(join(tmpdir(), 'kcap-script-'))
   try {
     const bin = join(dir, 'bin')
@@ -854,10 +939,21 @@ function runExportScript(script: string, items: unknown[]): ScriptRun {
     const fixture = join(dir, 'fixture.json')
     writeFileSync(fixture, JSON.stringify({ items }))
     writeFileSync(join(dir, 'export.sh'), script)
+    const metricsEnv: Record<string, string> = {}
+    if (metrics) {
+      const metricsDir = join(dir, 'metrics')
+      mkdirSync(metricsDir)
+      writeFileSync(join(metricsDir, 'served'), '0')
+      writeFileSync(join(metricsDir, 'pods.json'), JSON.stringify({ items: metrics.pods }))
+      metrics.samples.forEach((sample, index) => {
+        writeFileSync(join(metricsDir, `sample-${index + 1}.json`), JSON.stringify({ items: sample }))
+      })
+      metricsEnv.KCAP_METRICS_DIR = metricsDir
+    }
     const result = spawnSync('bash', ['export.sh'], {
       cwd: dir,
       encoding: 'utf8',
-      env: { ...env, PATH: `${bin}:${env.PATH ?? ''}`, KCAP_FIXTURE: fixture },
+      env: { ...env, PATH: `${bin}:${env.PATH ?? ''}`, KCAP_FIXTURE: fixture, ...metricsEnv },
     })
     if (result.status !== 0) throw new Error(`export script failed (${String(result.status)}): ${result.stderr}`)
     return { doc: JSON.parse(readFileSync(join(dir, 'kcap-export.json'), 'utf8')) as ClusterExport, stderr: result.stderr }
@@ -901,6 +997,33 @@ const FLAGGER_FIXTURE = [
   rawHpa('cache', 'StatefulSet', 'cache'),
 ]
 
+function rawPodMetrics(name: string, cpu: string, memory: string): unknown {
+  return { metadata: { namespace: 'default', name }, containers: [{ name: 'app', usage: { cpu, memory } }] }
+}
+
+// Two pods of `web` whose busiest moments fall in different samples, so the
+// per-pod averages (150m, 350m, 400m) separate kcap's peak — the highest of
+// them — from the average of each pod's own maximum, which would be 650m.
+const METRICS_FIXTURE: MetricsFixture = {
+  pods: [
+    { metadata: { namespace: 'default', name: 'web-1', labels: { app: 'web' } }, status: { phase: 'Running' } },
+    { metadata: { namespace: 'default', name: 'web-2', labels: { app: 'web' } }, status: { phase: 'Running' } },
+  ],
+  samples: [
+    [rawPodMetrics('web-1', '100m', '128Mi'), rawPodMetrics('web-2', '200m', '256Mi')],
+    [rawPodMetrics('web-1', '600m', '1024Mi'), rawPodMetrics('web-2', '100m', '128Mi')],
+    [rawPodMetrics('web-1', '100m', '128Mi'), rawPodMetrics('web-2', '700m', '1280Mi')],
+  ],
+}
+
+// Mimics an operator editing the two sampling variables at the top of the
+// downloaded script, the way the SKIP_ZERO_REPLICAS test does.
+function sampledScript(samples: number, intervalSeconds: number): string {
+  return buildExportScript('', '')
+    .replace('\nUSAGE_SAMPLES=1\n', `\nUSAGE_SAMPLES=${samples}\n`)
+    .replace('\nUSAGE_INTERVAL_SECONDS=30\n', `\nUSAGE_INTERVAL_SECONDS=${intervalSeconds}\n`)
+}
+
 describe('export script execution (stub kubectl)', () => {
   let filtered: ScriptRun
 
@@ -941,6 +1064,50 @@ describe('export script execution (stub kubectl)', () => {
     expect(run.doc.workloads).toHaveLength(FLAGGER_FIXTURE.length)
     expect(run.stderr).not.toContain('skipped')
   })
+
+  it('captures one sample by default, as a one-element samples array', () => {
+    const run = runExportScript(buildExportScript('', ''), [rawWorkload('Deployment', 'web', 2)], METRICS_FIXTURE)
+    // `samples` is the only place usage lives, so a point-in-time capture is a
+    // single sample with a zero window. Gate G3 approved sampling off by default.
+    expect(Object.keys(run.doc.usage ?? {}).sort()).toEqual(['pods', 'samples', 'window_seconds'])
+    expect(run.doc.usage?.samples).toHaveLength(1)
+    expect(run.doc.usage?.samples?.[0]).toHaveLength(METRICS_FIXTURE.samples[0].length)
+    expect(run.doc.usage?.window_seconds).toBe(0)
+    expect(run.stderr).not.toContain('captured usage sample')
+    expect(run.stderr).toContain('2 pod metrics in 1 sample(s)')
+
+    // One capture still reads as a snapshot with no peak.
+    const workload = transformClusterExport(run.doc).workloads['default/web']
+    expect(workload.usage_source).toBe('metrics-server-snapshot')
+    expect(workload.observed_cpu_per_pod).toEqual({ avg: 150, p95: null, peak: null })
+  })
+
+  it('captures N samples when USAGE_SAMPLES is raised, and each peak clears its average', () => {
+    const script = sampledScript(3, 1)
+    const run = runExportScript(script, [rawWorkload('Deployment', 'web', 2)], METRICS_FIXTURE)
+    expect(run.doc.usage?.samples).toHaveLength(3)
+    // Measured, not nominal: two 1-second intervals actually elapsed.
+    expect(run.doc.usage?.window_seconds).toBeGreaterThanOrEqual(2)
+    expect(run.stderr).toContain('captured usage sample 3 of 3')
+    expect(run.stderr).toContain('2 pod metrics in 3 sample(s)')
+
+    const parsed = parseImport(JSON.stringify(run.doc))
+    expect(parsed.kind).toBe('cluster')
+    if (parsed.kind !== 'cluster') return
+    const result = transformClusterExport(parsed.data)
+    expect(result.warnings).toEqual([])
+    for (const workload of Object.values(result.workloads)) {
+      for (const stat of [workload.observed_cpu_per_pod, workload.observed_memory_per_pod]) {
+        expect(stat?.peak).not.toBeNull()
+        // The engine rejects peak < avg; the same rounding on both is what
+        // guarantees this survives the arithmetic.
+        expect(stat?.peak ?? 0).toBeGreaterThanOrEqual(stat?.avg ?? 0)
+      }
+      expect(workload.usage_source).toBe('metrics-server-samples')
+    }
+    // Per-pod averages of 150m, 350m, 400m across the three samples.
+    expect(result.workloads['default/web'].observed_cpu_per_pod).toEqual({ avg: 300, p95: null, peak: 400 })
+  }, 20_000)
 
   it('round-trips the filtered export through the importer with zero warnings', () => {
     const parsed = parseImport(JSON.stringify(filtered.doc))

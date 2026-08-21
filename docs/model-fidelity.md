@@ -95,6 +95,17 @@ path, and say nothing about the time a cluster spends between them.
 imports as one that does not scale on anything.
 `importers.ts` `toHpa` ⇄ [`MetricSpec`](https://github.com/kubernetes/kubernetes/blob/v1.33.0/staging/src/k8s.io/api/autoscaling/v2/types.go#L102)
 
+**Observed usage.** Per-pod usage is summed from `PodMetrics.containers[].usage` and averaged
+over the pods a workload's selector matches. Upstream stamps each `PodMetrics` with the interval
+its numbers came from — `[Timestamp-Window, Timestamp]` — and the export projection keeps neither,
+so kcap cannot tell a fresh reading from a stale one. `usage_window_seconds` reports kcap's *own*
+capture span instead: the measured time from the first sample to the last, and 0 for the
+single-sample default. A `peak` therefore exists only when the export sampled more than once, and
+it is the highest per-pod average any *single* sample showed — not the average of each pod's own
+maximum, which is a larger number describing a moment where every pod peaked together. `p95` is
+never derived; these sample counts cannot support one.
+`importers.ts` `observedUsage`, `buildExportScript` ⇄ [`PodMetrics`](https://github.com/kubernetes/kubernetes/blob/v1.33.0/staging/src/k8s.io/metrics/pkg/apis/metrics/v1beta1/types.go#L66)
+
 **Usage under scaling.** Observed per-pod usage is held constant across all five scenarios,
 though in reality adding replicas divides the same work across more pods and per-pod usage falls.
 The HPA scenarios show the shape of a response, not a converged steady state.

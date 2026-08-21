@@ -19,9 +19,10 @@ Keep assumptions visible. Never present an approximation as Kubernetes parity.
 - `frontend/src/api.ts` is the HTTP/type boundary; `importers.ts` holds pure
   Kubernetes/scenario transforms; `surge.ts` holds the rollout-surge unit math the
   editor shares with the engine; `caAction.ts` maps the engine's node deltas to the
-  results panel's CA-action readout; `components/` and `App.tsx` are the React UI.
-  Keep `api.ts`, `caAction.ts`, `defaults.ts`, `importers.ts`, and `surge.ts`
-  independent of UI modules — the `core-does-not-import-ui` rule in
+  results panel's CA-action readout; `usage.ts` keeps an edited observed-usage
+  summary within the engine's ordering rules; `components/` and `App.tsx` are the
+  React UI. Keep `api.ts`, `caAction.ts`, `defaults.ts`, `importers.ts`, `surge.ts`,
+  and `usage.ts` independent of UI modules — the `core-does-not-import-ui` rule in
   `frontend/dependency-cruiser.config.mjs` enforces this list.
 - `frontend/src/generated/` comes from FastAPI OpenAPI; never hand-edit it.
 - The production image builds Vite and serves it through FastAPI on port 8100.

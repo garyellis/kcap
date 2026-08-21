@@ -47,15 +47,32 @@ Then open <http://localhost:8123>.
 **Expect:** connection pill reads `Live`; the scenario tabs (`HPA min`, `Current`, `Desired`,
 `HPA max`, `Rollout`) each show a pod count; the verdict reads `Capacity clear`; no console
 errors.
-**Origin:** baseline · **Last verified:** 2026-08-20 (Session D)
+**Origin:** baseline · **Last verified:** 2026-08-20 (Session E, re-walked after the compat cleanup)
 
 ### R2 — Observed usage moves the HPA recommendation
-**Pins:** the usage editor reaches `evaluate_hpa` end to end — after P1.1/P1.2 this also
-exercises the legacy-scalar shim, since the editor still posts `observed_cpu_per_pod_m`.
-**Steps:** select workload `api`, set **Current CPU usage / pod** to `900`, blur the field.
+**Pins:** the usage editor reaches `evaluate_hpa` end to end. The editor posts the
+`observed_cpu_per_pod` summary, which since the Session E cleanup is the only form the API
+accepts at all.
+**Steps:** select workload `api`, set **Average CPU usage / pod** to `900`, blur the field.
 **Expect:** the `Desired` tab's pod count rises (12 → 15 on the shipped defaults); the change
 chip reads `1 change`; no 422 in the console or the server log.
-**Origin:** P1.1/P1.2 (Session D) · **Last verified:** 2026-08-20 (Session D)
+**Origin:** P1.1/P1.2 (Session D), relabelled by P1.3 (Session E) · **Last verified:**
+2026-08-20 (Session E, walked at 1200 mCPU: 12 → 18)
+
+### R16 — A peak can be entered, and cannot be entered below the average
+**Pins:** P1.3's optional peak input, and the `peak >= avg` ordering that `usage.ts` keeps the
+editor inside. The engine returns that violation as a message-only 422, so a config the UI can
+compose but the engine must reject would surface as an unexplained error banner.
+**Steps:** select `api` (average CPU 620 on the shipped defaults). (a) Set **Peak CPU usage /
+pod** to `400` and blur. (b) Set it to `900` and blur. (c) Now raise **Average CPU usage / pod**
+to `1200` and blur.
+**Expect:** (a) the field snaps to `620` — the average is the smallest honest peak. (b) it holds
+`900`. (c) the peak follows the average up to `1200`, never left stranded below it. Every
+projected number — the five scenario tabs, the verdict, the CA action — is identical before and
+after (a) and (b); only (c) moves them, and it moves them because the *average* changed. No 422
+anywhere. Setting a peak back to `0` clears the measurement.
+**Origin:** P1.3 (Session E) · **Last verified:** 2026-08-20 (Session E, before the compat
+cleanup — which did not touch `usage.ts` or these fields)
 
 ---
 
@@ -157,7 +174,7 @@ count. (b) Reset, then set **Current CPU usage / pod** high enough that the raw 
 exceeds the **Replica ceiling**.
 **Expect:** (a) the callout reads `held at N by the minimum`; (b) it reads `held at N by the
 ceiling`. The wording must match the direction in both cases.
-**Origin:** P0.5 (Session A) · **Last verified:** 2026-08-20 (Session D)
+**Origin:** P0.5 (Session A) · **Last verified:** 2026-08-20 (Session E, re-walked after the compat cleanup)
 
 ---
 
@@ -176,7 +193,7 @@ dialog.
 **Expect:** the workload lands as `demo/web` with **CPU request** `600` mCPU and **CPU limit
 value** `600` mCPU (500 + 100 on both sides), memory `640` / `640` MiB, the evaluation is
 `Live`, and no 422 appears in the console or the server log.
-**Origin:** P0.1 (Session A) · **Last verified:** 2026-08-20 (Session D)
+**Origin:** P0.1 (Session A) · **Last verified:** 2026-08-20 (Session E, re-walked after the compat cleanup)
 
 ### R12 — An absolute maxSurge survives the import
 **Pins:** the importer half of P0.2 — `maxSurge: 1` maps to pods, not to a percentage of
@@ -184,7 +201,7 @@ current replicas.
 **Steps:** with F1 imported (it carries `maxSurge: 1`), read the **Rollout max surge** field.
 **Expect:** the unit picker shows `pods` and the value is `1`, derived from the imported
 config rather than stored separately.
-**Origin:** P0.2 (Session B) · **Last verified:** 2026-08-20 (Session D)
+**Origin:** P0.2 (Session B) · **Last verified:** 2026-08-20 (Session E, re-walked after the compat cleanup)
 
 ### R13 — Same-named workloads of different kinds both survive
 **Pins:** P0.4 — `namespace/name` alone let a Deployment and a StatefulSet silently replace
@@ -193,6 +210,19 @@ each other.
 **Expect:** two workloads appear, keyed `demo/web (deployment)` and `demo/web (statefulset)`,
 with exactly one warning explaining the rename.
 **Origin:** P0.4 (Session A) · **Last verified:** 2026-08-20 (Session D)
+
+### R17 — A scenario from any other version is refused, not guessed at
+**Pins:** the version check that closes E26. This branch used to accept *any* version, so a
+file written under different field names was read with today's rules and silently
+mis-imported. Since the Session E cleanup there is no upgrade path either: version 3 is the
+only one that loads, and the refusal has to be legible rather than a downstream 422.
+**Steps:** import fixture **F3** (a version-2 file). Then edit its `"version": 2` to
+`"version": 999` and import again.
+**Expect:** both refuse in the dialog — `Cannot import. Unsupported kcap-scenario version 2 —
+expected 3.` and the same sentence for `999`. The configuration behind the dialog is untouched
+in both cases, and the commit button never becomes available. R14 covers the version-3 file
+that does load.
+**Origin:** P1.3, rewritten by the Session E cleanup · **Last verified:** 2026-08-20 (Session E, re-walked after the compat cleanup)
 
 ### R14 — A saved scenario round-trips
 **Pins:** save/load, including the surge unit mode, which is derived from the config rather
@@ -230,8 +260,8 @@ that change.
 
 ## Fixtures
 
-Paste as-is. Both are `kcap-cluster-export` version 1 with no node or usage block, so the
-importer derives a single default pool.
+Paste as-is. F1 and F2 are `kcap-cluster-export` version 1 with no node or usage block, so the
+importer derives a single default pool. F3 is a saved kcap scenario, not an export.
 
 ### F1 — Guaranteed pod with a native sidecar, absolute maxSurge
 
@@ -253,4 +283,27 @@ importer derives a single default pool.
   "containers":[{"resources":{"requests":{"cpu":"250m","memory":"256Mi"}}}]},
  {"kind":"StatefulSet","namespace":"demo","name":"web","replicas":2,
   "containers":[{"resources":{"requests":{"cpu":"250m","memory":"256Mi"}}}]}]}
+```
+
+### F3 — A scenario from a version kcap no longer reads
+
+A version-2 file, carrying the scalar usage fields that predate the `{avg, p95, peak}` summary.
+The body is deliberately well-formed: the refusal must come from the version, not from anything
+downstream noticing the old field names.
+
+```json
+{"kind":"kcap-scenario","version":2,"exported_at":"2026-01-01T00:00:00.000Z","config":{
+ "workloads":{
+  "legacy":{"name":"legacy","resources":{"cpu_request_m":500,"memory_request_mib":512,
+    "cpu_limit_m":null,"memory_limit_mib":null},"current_replicas":4,
+   "observed_cpu_per_pod_m":300,"observed_memory_per_pod_mib":400,
+   "hpa":{"min_replicas":2,"max_replicas":10,"cpu_target_percentage":70,
+    "memory_target_percentage":null},"rollout":{"max_surge_percent":25},"pool":"primary"},
+  "idle":{"name":"idle","resources":{"cpu_request_m":250,"memory_request_mib":256,
+    "cpu_limit_m":null,"memory_limit_mib":null},"current_replicas":2,
+   "observed_cpu_per_pod_m":null,"observed_memory_per_pod_mib":null,
+   "hpa":null,"rollout":{"max_surge_percent":25},"pool":"primary"}},
+ "node_pools":{"primary":{"name":"primary","machine":{"cpu_m":4000,"memory_mib":16384,
+   "reserved_cpu_m":400,"reserved_memory_mib":1536,"max_pods":110},
+  "min_nodes":1,"current_nodes":3,"max_nodes":10}}}}
 ```

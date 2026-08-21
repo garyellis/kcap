@@ -8,6 +8,7 @@ import type {
   PoolScenarioResultSchema,
   ResourcesSchema,
   RolloutSchema,
+  UsageStatSchema,
   WorkloadResultSchema,
   WorkloadSchema,
 } from './generated'
@@ -21,9 +22,12 @@ type MachineSpec = WithDefaults<
   'max_pods' | 'reserved_cpu_m' | 'reserved_memory_mib'
 >
 type Rollout = WithDefaults<RolloutSchema, 'max_surge_percent'>
+export type UsageStat = UsageStatSchema
+// Observed usage is a UsageStat summary everywhere: the editor, the defaults,
+// and the importer all produce one, and it is the only form the API accepts.
 type WorkloadWithDefaults = WithDefaults<
   WorkloadSchema,
-  'hpa' | 'observed_cpu_per_pod_m' | 'observed_memory_per_pod_mib' | 'pool' | 'rollout'
+  'hpa' | 'observed_cpu_per_pod' | 'observed_memory_per_pod' | 'pool' | 'rollout'
 >
 
 export type Workload = Omit<WorkloadWithDefaults, 'hpa' | 'resources' | 'rollout'> & {

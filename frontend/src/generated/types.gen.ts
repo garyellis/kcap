@@ -559,10 +559,6 @@ export type WorkloadResultSchema = {
      */
     desired_replicas: number;
     /**
-     * Hpa Saturated
-     */
-    hpa_saturated: boolean;
-    /**
      * Max Replicas
      */
     max_replicas: number;
@@ -602,25 +598,9 @@ export type WorkloadSchema = {
      */
     observed_cpu_per_pod?: UsageStatSchema | null;
     /**
-     * Observed Cpu Per Pod M
-     *
-     * Deprecated: send observed_cpu_per_pod.avg instead. A scalar was always an average, so it is accepted and normalized into observed_cpu_per_pod, which is where it is validated and where any error names it; responses never carry it.
-     *
-     * @deprecated
-     */
-    observed_cpu_per_pod_m?: number | null;
-    /**
      * Observed memory usage per pod in MiB.
      */
     observed_memory_per_pod?: UsageStatSchema | null;
-    /**
-     * Observed Memory Per Pod Mib
-     *
-     * Deprecated: send observed_memory_per_pod.avg instead. A scalar was always an average, so it is accepted and normalized into observed_memory_per_pod, which is where it is validated and where any error names it; responses never carry it.
-     *
-     * @deprecated
-     */
-    observed_memory_per_pod_mib?: number | null;
     /**
      * Pool
      *

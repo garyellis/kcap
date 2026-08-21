@@ -2,13 +2,14 @@ import { useEffect, useMemo, useState } from 'react'
 import type { ReactNode } from 'react'
 import './App.css'
 import { compareClusters } from './api'
-import type { ClusterConfig, CompareResponse, NodePool, PoolScenarioResult, Workload, WorkloadResult } from './api'
+import type { ClusterConfig, CompareResponse, NodePool, PoolScenarioResult, UsageStat, Workload, WorkloadResult } from './api'
 import { caAction } from './caAction'
 import { ExportModal } from './components/ExportModal'
 import { NumberField, TextField, Toggle } from './components/Fields'
 import { ImportModal } from './components/ImportModal'
 import { cloneBaseline, createPool, createWorkload, nextPoolName, nextWorkloadName } from './defaults'
 import { SURGE_PERCENT_MAX, SURGE_PODS_MAX, SURGE_UNITS, surgeUnitOf, surgeUnitPatch } from './surge'
+import { withAvg, withPeak } from './usage'
 
 const SCENARIOS = [
   ['hpa_min', 'HPA min'],
@@ -305,6 +306,16 @@ function WorkloadEditor({
     update((current) => ({ ...current, hpa: current.hpa ? { ...current.hpa, ...patch } : null }))
   }
 
+  // Observed usage is a summary per dimension, not a scalar. The editor writes
+  // avg and peak; p95 is read from a file and preserved, never edited here.
+  // usage.ts keeps the pair ordered the way the engine requires.
+  const cpuUsage = workload.observed_cpu_per_pod
+  const memoryUsage = workload.observed_memory_per_pod
+  const updateUsage = (
+    dimension: 'observed_cpu_per_pod' | 'observed_memory_per_pod',
+    stat: UsageStat,
+  ) => update((current) => ({ ...current, [dimension]: stat }))
+
   // The surge unit is derived, never stored (see surgeUnitOf in surge.ts), so a
   // workload loaded from a scenario file or a cluster import opens in the unit
   // its data implies.
@@ -343,10 +354,12 @@ function WorkloadEditor({
         <div className="field-grid field-grid--four">
           <TextField label="Workload name" value={workload.name} onCommit={rename} hint="Unique configuration key" />
           <NumberField label="Current replicas" sliderMax={50} value={workload.current_replicas} min={0} max={10000} unit="pods" onChange={(current_replicas) => update((current) => ({ ...current, current_replicas }))} />
-          <NumberField label="Current CPU usage / pod" sliderMax={4000} value={workload.observed_cpu_per_pod_m ?? 0} min={0} max={128000} step={10} unit="mCPU" onChange={(observed_cpu_per_pod_m) => update((current) => ({ ...current, observed_cpu_per_pod_m }))} hint="Current average; feeds HPA" />
-          <NumberField label="Current memory usage / pod" sliderMax={8192} value={workload.observed_memory_per_pod_mib ?? 0} min={0} max={1048576} step={16} unit="MiB" onChange={(observed_memory_per_pod_mib) => update((current) => ({ ...current, observed_memory_per_pod_mib }))} hint="Current average; feeds HPA" />
+          <NumberField label="Average CPU usage / pod" sliderMax={4000} value={cpuUsage?.avg ?? 0} min={0} max={128000} step={10} unit="mCPU" onChange={(avg) => updateUsage('observed_cpu_per_pod', withAvg(cpuUsage, avg))} hint="Feeds HPA" />
+          <NumberField label="Average memory usage / pod" sliderMax={8192} value={memoryUsage?.avg ?? 0} min={0} max={1048576} step={16} unit="MiB" onChange={(avg) => updateUsage('observed_memory_per_pod', withAvg(memoryUsage, avg))} hint="Feeds HPA" />
         </div>
         <div className="field-grid field-grid--four field-grid--continuation">
+          <NumberField label="Peak CPU usage / pod" sliderMax={4000} value={cpuUsage?.peak ?? 0} min={0} max={128000} step={10} unit="mCPU" onChange={(peak) => updateUsage('observed_cpu_per_pod', withPeak(cpuUsage, peak))} hint="Optional; 0 = not measured" />
+          <NumberField label="Peak memory usage / pod" sliderMax={8192} value={memoryUsage?.peak ?? 0} min={0} max={1048576} step={16} unit="MiB" onChange={(peak) => updateUsage('observed_memory_per_pod', withPeak(memoryUsage, peak))} hint="Optional; 0 = not measured" />
           <NumberField label="Rollout max surge" sliderMax={surgeMode === 'pods' ? 50 : 100} value={surgeMode === 'pods' ? surgePods ?? 0 : workload.rollout.max_surge_percent} min={0} max={surgeMode === 'pods' ? SURGE_PODS_MAX : SURGE_PERCENT_MAX} step={surgeMode === 'pods' ? 1 : 5} fractional={surgeMode === '%'} unit={surgeMode} unitOptions={SURGE_UNITS} onUnitChange={switchSurgeMode} onChange={(next) => updateRollout(surgeMode === 'pods' ? { max_surge_pods: next } : { max_surge_percent: next })} hint="Applied at HPA maximum" />
           {poolNames.length > 1 && (
             <label className="field">
@@ -425,10 +438,10 @@ function WorkloadEditor({
               <div><span>Current memory</span><strong className="num">{result?.memory_utilization_percent === null || result === undefined ? '—' : `${Math.round(result.memory_utilization_percent)}%`}</strong><small>{hpa.memory_target_percentage === null ? 'metric inactive' : `target ${hpa.memory_target_percentage}%`}</small></div>
               <div>
                 <span>Recommended</span>
-                <strong className={`num${result?.hpa_saturated ? ' is-clamped' : ''}`}>
-                  {result ? (result.hpa_saturated ? <><s>{result.raw_desired_replicas}</s> <span className="clamped-to">→ {result.desired_replicas}</span></> : result.desired_replicas) : '—'}
+                <strong className={`num${result?.clamped_by ? ' is-clamped' : ''}`}>
+                  {result ? (result.clamped_by ? <><s>{result.raw_desired_replicas}</s> <span className="clamped-to">→ {result.desired_replicas}</span></> : result.desired_replicas) : '—'}
                 </strong>
-                <small>{result?.hpa_saturated ? <><em className="chip chip--warn">Clamped</em><span className="num">{hpa.min_replicas}–{hpa.max_replicas}</span></> : 'highest metric wins'}</small>
+                <small>{result?.clamped_by ? <><em className="chip chip--warn">Clamped</em><span className="num">{hpa.min_replicas}–{hpa.max_replicas}</span></> : 'highest metric wins'}</small>
               </div>
               <div><span>Ceiling</span><strong className="num">{hpa.max_replicas}</strong><small>HPA hard maximum</small></div>
             </div>

@@ -626,9 +626,9 @@ class TestHpaSaturation:
         assert result.cpu_utilization_percent == 700
         assert result.raw_desired_replicas == 79
         assert result.desired_replicas == 9
-        assert result.hpa_saturated is True
+        assert result.clamped_by == "max"
 
-    def test_unclamped_recommendation_is_not_saturated(self) -> None:
+    def test_unclamped_recommendation_reports_no_clamp(self) -> None:
         cluster = cluster_with(
             Workload(
                 name="api",
@@ -643,7 +643,6 @@ class TestHpaSaturation:
 
         assert result.raw_desired_replicas == 8
         assert result.desired_replicas == 8
-        assert result.hpa_saturated is False
         assert result.clamped_by is None
 
     def test_clamped_by_names_the_ceiling_that_capped_the_recommendation(self) -> None:
@@ -827,9 +826,11 @@ def scalar_usage_evaluate(
     """The pre-P1.1 evaluate(), reproduced with no knowledge of UsageStat.
 
     Observed usage is read here as one scalar per dimension, taken from
-    `scalars`, exactly as engine.evaluate_hpa read Workload's
-    observed_cpu_per_pod_m / observed_memory_per_pod_mib before the
-    distribution summary existed. Everything downstream of the HPA numbers is
+    `scalars`, exactly as engine.evaluate_hpa read Workload's two scalar
+    observed-usage fields — one CPU figure in millicores, one memory figure in
+    MiB — before the distribution summary replaced them with
+    observed_cpu_per_pod / observed_memory_per_pod. Everything downstream of
+    the HPA numbers is
     the shipped engine, so a difference in the compared result can only come
     from the usage change.
     """

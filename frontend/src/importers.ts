@@ -1,11 +1,11 @@
-import type { ClusterConfig, Hpa, NodePool, Workload } from './api'
+import type { ClusterConfig, Hpa, NodePool, UsageStat, Workload } from './api'
 
 // Versioned import/export contract. A future in-cluster discovery endpoint
 // will emit the same kcap-cluster-export document and reuse this transform,
 // so everything in this module stays pure — no React, no fetch, no DOM.
 
 export const SCENARIO_KIND = 'kcap-scenario'
-export const SCENARIO_VERSION = 2
+export const SCENARIO_VERSION = 3
 export const CLUSTER_EXPORT_KIND = 'kcap-cluster-export'
 export const CLUSTER_EXPORT_VERSION = 1
 
@@ -58,7 +58,10 @@ export type ExportedPodUsage = {
 // ({name, namespace, labels, phase}) that the importer joins on.
 export type ExportedUsage = {
   pods?: ExportedPod[] | null
-  metrics?: ExportedPodUsage[] | null
+  // Every capture, oldest first. A point-in-time export carries exactly one.
+  samples?: ExportedPodUsage[][] | null
+  // Measured elapsed time from the first capture to the last; 0 for one sample.
+  window_seconds?: number | null
 }
 
 export type ExportedHpa = {
@@ -84,7 +87,8 @@ export type ClusterExport = {
   version: typeof CLUSTER_EXPORT_VERSION
   workloads: Array<ExportedWorkload | ExportedHpa>
   nodes: ExportedNode[] | null
-  // Added after version 1 shipped; optional so older exports still import.
+  // Null when the cluster has no metrics-server, or the exporter lacked
+  // permission to read pod metrics.
   usage?: ExportedUsage | null
 }
 
@@ -115,19 +119,10 @@ function normalizeScenarioConfig(raw: unknown): { config: ClusterConfig } | { er
   if (!isRecord(raw.workloads) || Object.keys(raw.workloads).length === 0) {
     return { error: 'Scenario config has no workloads.' }
   }
-  const data = { ...raw }
-  if ('node_pool' in data) {
-    if ('node_pools' in data) return { error: 'Provide node_pools or the legacy node_pool, not both.' }
-    const pool = data.node_pool
-    const name = isRecord(pool) && typeof pool.name === 'string' ? pool.name : ''
-    if (!name) return { error: 'Legacy node_pool.name is required.' }
-    delete data.node_pool
-    data.node_pools = { [name]: pool }
-  }
-  if (!isRecord(data.node_pools) || Object.keys(data.node_pools).length === 0) {
+  if (!isRecord(raw.node_pools) || Object.keys(raw.node_pools).length === 0) {
     return { error: 'Scenario config has no node pools.' }
   }
-  return { config: data as unknown as ClusterConfig }
+  return { config: raw as unknown as ClusterConfig }
 }
 
 export function parseImport(text: string): ParsedImport {
@@ -145,6 +140,14 @@ export function parseImport(text: string): ParsedImport {
   if (!isRecord(raw)) return { kind: 'error', message: 'Expected a JSON object at the top level.' }
 
   if (raw.kind === SCENARIO_KIND) {
+    // This branch used to accept any version at all (E26), so a file written by
+    // a later kcap would be read with today's rules.
+    if (raw.version !== SCENARIO_VERSION) {
+      return {
+        kind: 'error',
+        message: `Unsupported ${SCENARIO_KIND} version ${String(raw.version)} — expected ${SCENARIO_VERSION}.`,
+      }
+    }
     const normalized = normalizeScenarioConfig(raw.config)
     if ('error' in normalized) return { kind: 'error', message: normalized.error }
     return { kind: 'scenario', config: normalized.config }
@@ -158,16 +161,9 @@ export function parseImport(text: string): ParsedImport {
     }
     return { kind: 'cluster', data: raw as unknown as ClusterExport }
   }
-  // A bare config (possibly pre-envelope, possibly legacy single-pool) is
-  // accepted as a scenario.
-  if ('workloads' in raw && ('node_pools' in raw || 'node_pool' in raw)) {
-    const normalized = normalizeScenarioConfig(raw)
-    if ('error' in normalized) return { kind: 'error', message: normalized.error }
-    return { kind: 'scenario', config: normalized.config }
-  }
   return {
     kind: 'error',
-    message: `Unrecognized document — expected kind "${SCENARIO_KIND}", kind "${CLUSTER_EXPORT_KIND}", or a bare cluster config.`,
+    message: `Unrecognized document — expected kind "${SCENARIO_KIND}" or kind "${CLUSTER_EXPORT_KIND}".`,
   }
 }
 
@@ -334,36 +330,83 @@ export function rolloutFromMaxSurge(kind: string, maxSurge: string | number | nu
   return { max_surge_percent: DEFAULT_MAX_SURGE_PERCENT, max_surge_pods: Math.round(absolute) }
 }
 
+// A point-in-time capture; it can report an average but never a peak.
+const SNAPSHOT_SOURCE = 'metrics-server-snapshot'
+// Two or more captures spaced apart — the same source, but no longer an instant.
+const SAMPLED_SOURCE = 'metrics-server-samples'
+
+export type ObservedUsage = {
+  cpu: UsageStat
+  memory: UsageStat
+  source: string
+  window_seconds: number
+}
+
+// avg is the mean of the per-sample figures, peak the largest of them, and both
+// take the same rounding: Math.round is monotonic, so `peak >= avg` — a domain
+// invariant the engine rejects violations of — survives it, which two different
+// rounding rules would not guarantee.
+//
+// **Peak is the highest per-pod average any single sample showed** — a figure
+// the fleet actually exhibited at one instant, and still a per-pod figure. It is
+// deliberately *not* the average of each pod's own maximum: that number is
+// larger, assumes every pod peaked simultaneously, and describes no moment that
+// ever happened.
+function statAcrossSamples(perSample: number[]): UsageStat {
+  const mean = perSample.reduce((total, value) => total + value, 0) / perSample.length
+  // One sample is a point in time. It has no peak to report, and inventing one
+  // from it would make a snapshot look like a measurement.
+  const peak = perSample.length > 1 ? Math.round(Math.max(...perSample)) : null
+  return { avg: Math.round(mean), p95: null, peak }
+}
+
 // Sum container usage per pod, then average across the running pods the
-// workload's selector matches in its namespace. PodMetrics has no labels, so
-// the pod listing carries the attribution. null when the export has no usage
-// data (older script, metrics-server absent) or nothing matched.
+// workload's selector matches in its namespace — once per captured sample.
+// PodMetrics has no labels, so the pod listing carries the attribution. null
+// when the export has no usage data (metrics-server absent) or
+// nothing matched. p95 stays null: these sample counts cannot support one.
 export function observedUsage(
   item: ExportedWorkload,
   usage: ExportedUsage | null | undefined,
-): { cpu_m: number; memory_mib: number } | null {
+): ObservedUsage | null {
   const selector = item.selector
-  if (!usage?.pods || !usage.metrics || !selector || Object.keys(selector).length === 0) return null
-  const metricsByPod = new Map<string, ExportedPodUsage>()
-  for (const metric of usage.metrics) metricsByPod.set(`${metric.namespace}/${metric.name}`, metric)
-  let pods = 0
-  let cpu = 0
-  let memory = 0
-  for (const pod of usage.pods) {
-    if (pod.namespace !== item.namespace) continue
-    if (pod.phase && pod.phase !== 'Running') continue
-    const labels = pod.labels ?? {}
-    if (!Object.entries(selector).every(([key, value]) => labels[key] === value)) continue
-    const metric = metricsByPod.get(`${pod.namespace}/${pod.name}`)
-    if (!metric) continue
-    pods += 1
-    for (const container of metric.containers ?? []) {
-      cpu += parseCpuQuantity(container.usage?.cpu)
-      memory += parseMemoryQuantity(container.usage?.memory)
+  const samples = usage?.samples && usage.samples.length > 0 ? usage.samples : null
+  if (!usage?.pods || !samples || !selector || Object.keys(selector).length === 0) return null
+
+  const cpuPerSample: number[] = []
+  const memoryPerSample: number[] = []
+  for (const sample of samples) {
+    const metricsByPod = new Map<string, ExportedPodUsage>()
+    for (const metric of sample) metricsByPod.set(`${metric.namespace}/${metric.name}`, metric)
+    let pods = 0
+    let cpu = 0
+    let memory = 0
+    for (const pod of usage.pods) {
+      if (pod.namespace !== item.namespace) continue
+      if (pod.phase && pod.phase !== 'Running') continue
+      const labels = pod.labels ?? {}
+      if (!Object.entries(selector).every(([key, value]) => labels[key] === value)) continue
+      const metric = metricsByPod.get(`${pod.namespace}/${pod.name}`)
+      if (!metric) continue
+      pods += 1
+      for (const container of metric.containers ?? []) {
+        cpu += parseCpuQuantity(container.usage?.cpu)
+        memory += parseMemoryQuantity(container.usage?.memory)
+      }
     }
+    // The pod listing is captured once, so a pod missing from an early sample
+    // simply does not count toward that sample's average.
+    if (pods === 0) continue
+    cpuPerSample.push(cpu / pods)
+    memoryPerSample.push(memory / pods)
   }
-  if (pods === 0) return null
-  return { cpu_m: Math.round(cpu / pods), memory_mib: Math.round(memory / pods) }
+  if (cpuPerSample.length === 0) return null
+  return {
+    cpu: statAcrossSamples(cpuPerSample),
+    memory: statAcrossSamples(memoryPerSample),
+    source: samples.length > 1 ? SAMPLED_SOURCE : SNAPSHOT_SOURCE,
+    window_seconds: usage.window_seconds ?? 0,
+  }
 }
 
 export type SelectorGroup = {
@@ -500,8 +543,11 @@ export function transformClusterExport(
         memory_limit_mib: summedLimit(containers, initContainers, 'memory'),
       },
       current_replicas: replicas,
-      observed_cpu_per_pod_m: observed?.cpu_m ?? null,
-      observed_memory_per_pod_mib: observed?.memory_mib ?? null,
+      observed_cpu_per_pod: observed?.cpu ?? null,
+      observed_memory_per_pod: observed?.memory ?? null,
+      usage_window_seconds: observed?.window_seconds ?? null,
+      // Never "": the schema floors this at one character.
+      usage_source: observed?.source ?? null,
       hpa: hpa ? toHpa(hpa) : null,
       rollout: rolloutFromMaxSurge(item.kind, item.maxSurge),
       pool: null,
@@ -522,17 +568,25 @@ export function transformClusterExport(
     }
   }
   const blankHpaWorkloads = Object.values(workloads).filter(
-    (workload) => workload.hpa !== null && workload.observed_cpu_per_pod_m === null && workload.observed_memory_per_pod_mib === null,
+    (workload) => workload.hpa !== null && workload.observed_cpu_per_pod === null && workload.observed_memory_per_pod === null,
   )
   if (blankHpaWorkloads.length > 0) {
     notes.push(
       data.usage
         ? 'Some HPA workloads matched no pod metrics, so their scenarios hold current replicas until you fill in observed usage.'
-        : 'This export carries no pod metrics (metrics-server unavailable, or an older export script), so HPA scenarios hold current replicas until you fill in observed usage.',
+        : 'This export carries no pod metrics (metrics-server unavailable, or not permitted), so HPA scenarios hold current replicas until you fill in observed usage.',
     )
   }
-  if (Object.values(workloads).some((workload) => workload.observed_cpu_per_pod_m !== null || workload.observed_memory_per_pod_mib !== null)) {
-    notes.push('Observed per-pod usage is a point-in-time average from pod metrics captured at export time.')
+  if (Object.values(workloads).some((workload) => workload.observed_cpu_per_pod !== null || workload.observed_memory_per_pod !== null)) {
+    // How thin the capture window was, and what "peak" means when there is one.
+    // The proposal files this disclosure under exposure analysis, which does not
+    // exist yet; until it does, the import dialog is where it can be read.
+    const sampleCount = data.usage?.samples?.length ?? 1
+    notes.push(
+      sampleCount > 1
+        ? `Observed per-pod usage came from ${sampleCount} samples over ${data.usage?.window_seconds ?? 0}s. Peak is the highest per-pod average any one sample showed, not the sum of each pod's own maximum.`
+        : 'Observed per-pod usage is a point-in-time average from pod metrics captured at export time. One sample carries no peak — raise USAGE_SAMPLES in the export script to capture one.',
+    )
   }
   return { workloads, groups: [...groups.values()], carried, bestEffort, warnings, notes }
 }
@@ -857,6 +911,7 @@ export function buildExportScript(namespace: string, selector: string, skipZeroR
 #   - pod names, labels, and CPU/memory usage from metrics-server (when available)
 # It does NOT read env vars, images, annotations, or secrets.
 # Zero-replica workloads and their HPAs are dropped when SKIP_ZERO_REPLICAS=1.
+# Pod metrics are sampled once unless USAGE_SAMPLES is raised.
 #
 # Writes kcap-export.json for the kcap import dialog.
 set -euo pipefail
@@ -867,6 +922,12 @@ SELECTOR=${shellQuote(selector.trim())}
 # Flagger originals) and the HPAs targeting them are dropped from the export.
 # Set to 0 to capture zero-replica workloads and their HPAs too.
 SKIP_ZERO_REPLICAS=${skipZeroReplicas ? '1' : '0'}
+# Pod metrics are captured USAGE_SAMPLES times, USAGE_INTERVAL_SECONDS apart.
+# One sample is a point in time and carries no peak, which is why sampling is
+# off by default. Raise it to give kcap a peak, at the cost of
+# (USAGE_SAMPLES - 1) x USAGE_INTERVAL_SECONDS of extra runtime.
+USAGE_SAMPLES=1
+USAGE_INTERVAL_SECONDS=30
 
 echo "cluster context: $(kubectl config current-context)" >&2
 
@@ -905,9 +966,26 @@ fi
 usage=null
 if kubectl auth can-i list pods "\${podscope[@]}" >/dev/null 2>&1 \\
   && kubectl auth can-i list pods.metrics.k8s.io "\${podscope[@]}" >/dev/null 2>&1 \\
-  && metrics=$(kubectl get pods.metrics.k8s.io "\${podscope[@]}" -o json 2>/dev/null | jq '${POD_METRICS_PROJECTION}'); then
+  && first=$(kubectl get pods.metrics.k8s.io "\${podscope[@]}" -o json 2>/dev/null | jq '${POD_METRICS_PROJECTION}'); then
+  # $first is sample 1. $samples collects every sample oldest first and is
+  # always written out, so a point-in-time capture is simply a one-element
+  # samples array with a zero window.
+  first_at=$SECONDS
+  samples=$(jq -n --argjson first "$first" '[$first]')
+  window_seconds=0
+  captured=1
+  while [ "$captured" -lt "$USAGE_SAMPLES" ]; do
+    sleep "$USAGE_INTERVAL_SECONDS"
+    next=$(kubectl get pods.metrics.k8s.io "\${podscope[@]}" -o json | jq '${POD_METRICS_PROJECTION}')
+    samples=$(jq -n --argjson samples "$samples" --argjson next "$next" '$samples + [$next]')
+    captured=$((captured + 1))
+    # Measured, not nominal: what the samples actually span.
+    window_seconds=$((SECONDS - first_at))
+    echo "captured usage sample $captured of $USAGE_SAMPLES" >&2
+  done
   pods=$(kubectl get pods "\${podscope[@]}" -o json | jq '${POD_PROJECTION}')
-  usage=$(jq -n --argjson pods "$pods" --argjson metrics "$metrics" '{ pods: $pods, metrics: $metrics }')
+  usage=$(jq -n --argjson pods "$pods" --argjson samples "$samples" --argjson window "$window_seconds" \\
+    '{ pods: $pods, samples: $samples, window_seconds: $window }')
 else
   echo "no pod metrics (metrics-server missing or not permitted) — observed usage will be blank" >&2
 fi
@@ -916,6 +994,6 @@ jq -n --argjson workloads "$workloads" --argjson nodes "$nodes" --argjson usage 
   '{ kind: "kcap-cluster-export", version: 1, workloads: $workloads, nodes: $nodes, usage: $usage }' \\
   > kcap-export.json
 
-echo "wrote kcap-export.json: $(jq -r '.workloads | length' kcap-export.json) workload items, $(jq -r 'if .nodes == null then "no" else (.nodes | length) end' kcap-export.json) nodes, $(jq -r 'if .usage == null then "no" else (.usage.metrics | length) end' kcap-export.json) pod metrics" >&2
+echo "wrote kcap-export.json: $(jq -r '.workloads | length' kcap-export.json) workload items, $(jq -r 'if .nodes == null then "no" else (.nodes | length) end' kcap-export.json) nodes, $(jq -r 'if .usage == null then "no pod metrics" else "\\(.usage.samples[0] | length) pod metrics in \\(.usage.samples | length) sample(s)" end' kcap-export.json)" >&2
 `
 }
