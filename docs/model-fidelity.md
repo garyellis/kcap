@@ -61,6 +61,42 @@ and extended resources such as GPUs are neither imported nor packed, so a cluste
 one of them reads as roomier than it is.
 `engine.py` `PodRequest` ⇄ [`fitsRequest`](https://github.com/kubernetes/kubernetes/blob/v1.33.0/pkg/scheduler/framework/plugins/noderesources/fit.go#L499)
 
+**CPU entitlement under contention.** kcap flags a workload — or a container inside it, when the
+import carried a breakdown — observed above the CPU request that is its only guarantee, on a node
+whose placed pods together want more CPU than the node can schedule. Node pressure is summed from
+pod-level readings only. Per-container peaks do not sum — the maximum of a sum is not the sum of
+the maxima — so a workload measured only per container contributes its request, which is the
+scheduler's own assumption and what a pod with no reading at all contributes too; the block counts
+those pods and says *pod-level* when it does. A breakdown can therefore refine which unit a flag
+names, but never overrule the pod: when it names nobody, the pod-level flag stands, because an
+injected sidecar has no spec counterpart and its usage reaches only the pod figure. Requests always
+fit the node, so a contended node always holds something above its own request and always produces
+at least one flag. This is deliberately **not** a `cpu.shares` simulation. Upstream turns each
+request into a weight of `milliCPU × 1024 / 1000` floored at two shares — so a container that
+declared nothing is entitled to a fifth of a percent of a core rather than to literally none, which
+is why kcap reporting its floor as `0` is a rounding and not a claim. That weight divides CPU only
+among the *runnable* siblings at one level of a `kubepods` → QoS-class → pod → container hierarchy,
+in which Guaranteed pods hang off the root and compete against the whole burstable subtree rather
+than against individual pods. Reproducing that needs an assumption about which pods are busy at the
+same instant, which kcap has no basis for. So `worst_case_share_m` bounds one thing: the CPU a unit
+is entitled to if every pod on its node is runnable at once — one flat
+`request / Σ requests × allocatable` division, capped at the unit's own CPU limit and never above
+what the node has (a container request is not cross-checked against its pod's, so the raw ratio can
+exceed the machine). It flattens the cgroup nesting, ignores QoS class, and is a floor on the
+entitlement rather than a forecast of usage; the kernel hands out more whenever a neighbor is idle.
+Memory has no counterpart here by design: memory does not compress, so its failure mode is
+exhaustion, not sharing.
+`engine.py` `_evaluate_cpu_contention`, `_worst_case_share_m` ⇄ [`MilliCPUToShares`](https://github.com/kubernetes/kubernetes/blob/v1.33.0/pkg/kubelet/cm/helpers_linux.go#L88), [`ResourceConfigForPod`](https://github.com/kubernetes/kubernetes/blob/v1.33.0/pkg/kubelet/cm/helpers_linux.go#L124), [`setCPUCgroupConfig`](https://github.com/kubernetes/kubernetes/blob/v1.33.0/pkg/kubelet/cm/qos_container_manager_linux.go#L171)
+
+**Contention basis.** The flags read the highest observed statistic available — `peak`, else `p95`,
+else `avg` — and name the one they used, because a fallback makes every flag a lower bound: a
+workload whose average hides its spike can leave a genuinely contended node reading as clear. A
+container that falls back is folded into that same note rather than getting one of its own, which
+matters because per-container averages carry a further known downward bias (see "Per-container
+usage") on top of being an average. The only other note counts the pods whose request stood in for
+a reading. kcap warns; it never refuses to compute.
+`engine.py` `UsageStat.exposure`, `_basis_notes` ⇄ no upstream analogue
+
 ## Autoscaling
 
 **Replica formula.** kcap scales the current replica count, `ceil(current × ratio)`, from one
@@ -130,9 +166,17 @@ contradicts the pod. Staleness cannot be detected later — a breakdown that doe
 totals is the normal case, since the pod numbers are effective requests — so it is caught at the
 edit or not at all, and analysis falls back to the pod level, exactly as it does for the hand-built
 workloads that never had one.
-The breakdown is analysis-only and optional: nothing in placement, HPA math, or node counts reads
-it (it does surface in `/v1/compare`'s configuration diff, which reports every changed input), and
-it is absent for any workload configured in kcap's own editor.
+The breakdown is analysis-only and optional, and its one reader is the CPU contention analysis:
+nothing in placement, HPA math, or node counts reads it (it does surface in `/v1/compare`'s
+configuration diff, which reports every changed input). That one reader is not cosmetic. A listed
+container is compared against **its own** request rather than the pod's, so it can be flagged
+while its pod is not, and its request, usage, limit, and basis are the numbers on the flag — its
+request is the numerator of the worst-case bound and its limit is the bound's cap. What the
+breakdown cannot do is erase a flag: contention falls back to the pod reading when the list is
+absent (every workload configured in kcap's own editor), when it carries no container usage, and
+when it carries usage but names no borrower — that last case being the injected sidecar, whose
+usage reaches the pod figure and nothing else. Since a pod-level edit **drops** the breakdown,
+which flags an operator sees can change with an edit that touches no container.
 `importers.ts` `observedUsage`, `containerBreakdown`, `engine.py` `ContainerInfo` ⇄ [`ContainerMetrics`](https://github.com/kubernetes/kubernetes/blob/v1.33.0/staging/src/k8s.io/metrics/pkg/apis/metrics/v1beta1/types.go#L97)
 
 **Usage under scaling.** Observed per-pod usage is held constant across all five scenarios,
@@ -177,9 +221,11 @@ statically to one pool with no spillover — a stand-in for the placement those 
 and only as good as the assignment.
 `engine.py` `evaluate_scenario` ⇄ [`getDefaultPlugins`](https://github.com/kubernetes/kubernetes/blob/v1.33.0/pkg/scheduler/apis/config/v1/default_plugins.go#L30)
 
-**Limits.** Imported and validated, but inert: no effect on placement, HPA math, or node counts.
-That matches the scheduler, which fits on requests — but a cluster safe by request and
-exhaustible by limit reads as safe.
+**Limits.** Imported and validated, and inert to sizing: no effect on placement, HPA math, or
+node counts. That matches the scheduler, which fits on requests — but a cluster safe by request
+and exhaustible by limit reads as safe. The one thing a limit does move is the runtime-risk
+readout: a CPU limit caps the worst-case share on a contention flag, because a container cannot
+use a share larger than its own ceiling. Memory limits are still read by nothing.
 `engine.py` `Resources` ⇄ [`fitsRequest`](https://github.com/kubernetes/kubernetes/blob/v1.33.0/pkg/scheduler/framework/plugins/noderesources/fit.go#L499)
 
 ## Node capacity

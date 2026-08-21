@@ -349,6 +349,104 @@ class WorkloadResultSchema(ApiModel):
     rollout_replicas_at_max: int
 
 
+class ContentionFlagSchema(ApiModel):
+    """One workload — or one container inside it — living on borrowed CPU.
+
+    An entitlement claim, not a prediction: the guaranteed floor is the CPU
+    request, and everything observed above it exists only while neighbors are
+    idle.
+    """
+
+    workload: str
+    # No default: this is a response model, the engine always populates it, and
+    # a default would generate an optional field in the client types for
+    # something that is always present.
+    container: str | None = Field(
+        description=(
+            "Which container inside the pod is borrowing. Null means the flag "
+            "is pod-level, which is the common case rather than a degraded "
+            "one: kcap's editor is pod-level, so a hand-built workload carries "
+            "no per-container breakdown and an edited one has had its "
+            "breakdown dropped."
+        ),
+    )
+    cpu_request_m: int = Field(
+        description=(
+            "The guaranteed floor this reading is measured against, in "
+            "millicores. 0 for a container that declared neither a request nor "
+            "a limit: upstream still grants it the minimum two CPU shares "
+            "rather than none, which is a floor of effectively zero, so any "
+            "usage at all is borrowed."
+        ),
+    )
+    usage_cpu_m: int = Field(
+        description="The exposure-basis usage that tripped the flag, in millicores.",
+    )
+    usage_basis: engine.UsageBasis = Field(
+        description=(
+            "Which observed statistic supplied usage_cpu_m. Anything below "
+            "'peak' means the flag is a lower bound; basis_notes says so once "
+            "for the pool."
+        ),
+    )
+    replicas_affected: int = Field(
+        description="Replicas of this workload sharing a contended node.",
+    )
+    replicas_total: int = Field(
+        description=(
+            "The scenario's replicas for this workload in this pool. Every "
+            "replica of a workload has the same shape, so a flagged workload is "
+            "never one of the oversized ones and this counts placed pods."
+        ),
+    )
+    worst_case_share_m: int = Field(
+        description=(
+            "Proportional share of one node's allocatable CPU at this unit's "
+            "share of the node's requests, capped at its CPU limit and at what "
+            "the node has, minimized over the contended nodes hosting it. A "
+            "bound on the entitlement, never a prediction of what the container "
+            "will get."
+        ),
+    )
+    message: str = Field(
+        description=(
+            "One plain sentence carrying the numbers above, composed by the "
+            "engine so every consumer reports contention identically."
+        ),
+    )
+
+
+class CpuContentionSchema(ApiModel):
+    """Entitlement-based CPU contention for one pool in one scenario.
+
+    Memory is deliberately absent: memory does not compress, so a node that
+    cannot satisfy every pod at once kills rather than shares.
+    """
+
+    nodes_evaluated: int = Field(
+        description=(
+            "Nodes the packer opened for this pool. Fewer than the pool's node "
+            "count when min_nodes exceeds demand."
+        ),
+    )
+    contended_node_count: int = Field(
+        description=(
+            "Nodes whose placed pods' summed exposure-basis CPU usage exceeds "
+            "allocatable CPU."
+        ),
+    )
+    flags: list[ContentionFlagSchema] = Field(
+        description="Empty means all clear on this packing.",
+    )
+    basis_notes: list[str] = Field(
+        description=(
+            "Zero to two one-liners naming what weakened the flags: usage that "
+            "fell back below 'peak', and pods with no usage data whose request "
+            "was assumed instead."
+        ),
+    )
+
+
 class PoolScenarioResultSchema(ApiModel):
     pool: str
     pod_count: int
@@ -379,6 +477,14 @@ class PoolScenarioResultSchema(ApiModel):
     oversized_pod_count: int
     pods_per_node: int | None
     fragmentation_resource: str | None
+    cpu_contention: CpuContentionSchema | None = Field(
+        description=(
+            "Runtime CPU risk read off this pool's packing. Null when the "
+            "packer opened no nodes — a pool with nothing placeable has no "
+            "node that could be contended. Requests alone drive placement; "
+            "this block is additive context, never a verdict."
+        ),
+    )
 
 
 class ScenarioResultSchema(ApiModel):

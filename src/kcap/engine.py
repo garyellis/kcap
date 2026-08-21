@@ -221,6 +221,77 @@ ScaleDownBlockedReason = Literal["oversized_pods", "no_placeable_demand"]
 
 
 @dataclass(frozen=True)
+class ContentionFlag:
+    """One workload — or one container inside it — living on borrowed CPU.
+
+    The claim is an entitlement claim, not a prediction: the guaranteed floor
+    is the CPU request, and everything observed above it exists only while
+    neighbors are idle. Flags are raised only for units placed on a contended
+    node, and aggregate per (workload, container) because the operator question
+    is "which of my workloads are exposed", not "what happened on node 4".
+    """
+
+    workload: str
+
+    # Which container inside the pod is borrowing. None means the flag is
+    # pod-level, which is the common case rather than a degraded one: kcap's
+    # editor is pod-level, so a hand-built workload has no breakdown, and an
+    # edited one has had its breakdown dropped.
+    container: str | None
+
+    # The guaranteed floor this reading is measured against. 0 for a container
+    # that declared neither a request nor a limit: upstream still gives such a
+    # container the minimum two CPU shares rather than literally none, which at
+    # a fifth of a percent of one core is a floor of effectively zero.
+    cpu_request_m: int
+    usage_cpu_m: int
+    usage_basis: UsageBasis
+
+    # Replicas of this workload sharing a contended node, out of the scenario's
+    # replicas for it in this pool. Every replica of a workload has the same
+    # shape, so a flagged workload is never one of the oversized ones and the
+    # total is always a count of placed pods.
+    replicas_affected: int
+    replicas_total: int
+
+    # Proportional share of one node's allocatable CPU at this unit's share of
+    # the node's requests, capped at its CPU limit and at what the node has,
+    # minimized over the contended nodes hosting it. A bound on the entitlement,
+    # never a prediction of usage.
+    worst_case_share_m: int
+
+    # One plain sentence carrying the numbers above, composed here so every
+    # consumer of the API reports contention identically.
+    message: str
+
+
+@dataclass(frozen=True)
+class CpuContention:
+    """Entitlement-based CPU contention for one pool in one scenario.
+
+    Memory is deliberately absent: memory does not compress, so a node that
+    cannot satisfy every pod at once kills rather than shares, which is a limit
+    exposure question and not a contention one.
+    """
+
+    # Nodes the packer opened for this pool. Fewer than the pool's node count
+    # when min_nodes exceeds demand. The DaemonSet *pods* are outside this
+    # entirely — no usage of theirs is summed and they hold no slot — while the
+    # reservation standing in for them is inside every figure, since it is what
+    # allocatable subtracts.
+    nodes_evaluated: int
+    contended_node_count: int
+
+    # Empty means all clear on this packing.
+    flags: tuple[ContentionFlag, ...]
+
+    # Zero to two one-liners naming what weakened the reading above. Distinct
+    # from the importer's capture-window note: that describes the data, these
+    # describe what this analysis did with it.
+    basis_notes: tuple[str, ...]
+
+
+@dataclass(frozen=True)
 class PoolScenarioResult:
     pool: str
     pod_count: int
@@ -262,6 +333,10 @@ class PoolScenarioResult:
     # resource that produces it. Explains a fragmentation verdict.
     pods_per_node: int | None
     fragmentation_resource: str | None
+
+    # Runtime risk from the packing above. None when the packer opened no
+    # nodes — a pool with nothing placeable has no node to be contended.
+    cpu_contention: CpuContention | None
 
     @property
     def stranded_cpu_m(self) -> int:
@@ -1202,6 +1277,372 @@ def _shape_density(
     return pods_per_node, tightest_resource
 
 
+@dataclass(frozen=True)
+class _Borrower:
+    """One unit inside a pod whose observed CPU sits above its own request."""
+
+    container: str | None
+    cpu_request_m: int
+    usage_cpu_m: int
+    usage_basis: UsageBasis
+    cpu_limit_m: int | None
+
+
+def _pod_reading(workload: Workload) -> tuple[int, UsageBasis | None]:
+    """One of this workload's pods as a CPU figure, and the statistic behind it.
+
+    Exposure-basis usage when the workload has any, and the pod's request with a
+    None basis when it has none — the scheduler's own assumption, so a workload
+    with no metrics can neither hide contention nor fabricate it.
+
+    The single source for the three questions that ask it: what a pod
+    contributes to its node, whether that contribution was a fallback, and
+    whether the pod is running above its own request. Answering them separately
+    is how they drift apart.
+
+    Deliberately pod-level even when a breakdown is present. Per-container peaks
+    do not sum — the maximum of a sum is not the sum of the maxima — so adding
+    them would describe a moment where every container peaked together, which is
+    the reading Session E rejected when it defined `peak` at all.
+    """
+    stat = workload.observed_cpu_per_pod
+    if stat is None:
+        return workload.resources.cpu_request_m, None
+    return stat.exposure()
+
+
+def _node_cpu_usage_m(node: NodeAllocation, workloads: dict[str, Workload]) -> int:
+    """What the pods on one node are observed to want, together.
+
+    Summed from *pod* readings only. A container's usage is already inside its
+    pod's figure, so adding the breakdown here as well would invent load.
+    """
+    return sum(_pod_reading(workloads[pod.workload_name])[0] for pod in node.pods)
+
+
+def _pod_borrower(workload: Workload) -> list[_Borrower]:
+    """The pod itself, when its reading sits above the pod's own CPU request."""
+    usage_cpu_m, usage_basis = _pod_reading(workload)
+    if usage_basis is None or usage_cpu_m <= workload.resources.cpu_request_m:
+        # A pod with no reading contributed its request, so by construction it
+        # cannot have been observed above it.
+        return []
+    return [
+        _Borrower(
+            container=None,
+            cpu_request_m=workload.resources.cpu_request_m,
+            usage_cpu_m=usage_cpu_m,
+            usage_basis=usage_basis,
+            cpu_limit_m=workload.resources.cpu_limit_m,
+        )
+    ]
+
+
+def _borrowers(workload: Workload) -> list[_Borrower]:
+    """Which units of one of this workload's pods live above their CPU request.
+
+    Per-container when the breakdown names one, pod-level otherwise. The list is
+    never required — `Workload.containers` is absent for every hand-built
+    workload — and a breakdown that names nobody falls back to the pod rather
+    than silencing it. That fallback is load-bearing: an injected sidecar has no
+    spec counterpart, so by the importer's design its usage reaches only the pod
+    figure, and without it that pod would contend a node and be reported by
+    nothing, so adding a breakdown would *remove* a flag.
+
+    What the fallback does not do is reconcile the two levels. When the
+    breakdown names *some* borrower, only container rows are emitted, and they
+    attribute only what the breakdown can see: a pod 2500m above its request
+    whose one listed borrower is 281m above its own reports the 281m. That is
+    the shape the design chose — flags are per (workload, container), and §1.3
+    forbids cross-checking the breakdown against pod totals derived with
+    effective-request semantics — so the unattributed remainder is a known limit
+    of the attribution, not of the flag.
+
+    A container that declared neither a request nor a limit is measured against
+    a floor of zero, so any usage at all flags it. That is deliberately the same
+    rule every other unit gets rather than a special case: nothing in this
+    analysis filters by magnitude, a 20m container against a 19m request already
+    flags, and exempting the containers with *no* floor would silence the most
+    exposed shape on the node. The magnitude is in the row for the reader.
+    """
+    borrowers = []
+    for container in workload.containers or ():
+        if container.observed_cpu is None:
+            continue
+        usage_cpu_m, usage_basis = container.observed_cpu.exposure()
+        cpu_request_m = (
+            0 if container.cpu_request_m is None else container.cpu_request_m
+        )
+        if usage_cpu_m > cpu_request_m:
+            borrowers.append(
+                _Borrower(
+                    container=container.name,
+                    cpu_request_m=cpu_request_m,
+                    usage_cpu_m=usage_cpu_m,
+                    usage_basis=usage_basis,
+                    cpu_limit_m=container.cpu_limit_m,
+                )
+            )
+    return borrowers or _pod_borrower(workload)
+
+
+def _fallback_bases(workload: Workload) -> set[UsageBasis]:
+    """Statistics below `peak` that this workload's contention reading used.
+
+    Both levels are read — the pod stat drives every node sum, the container
+    stats decide who inside the pod is named — so a fallback at either weakens
+    the result and belongs in the notes. Per-container averages carry a known
+    downward bias (a container absent from a sample counts as zero for it), so
+    a container that falls back to avg is exactly what those notes are for.
+    """
+    bases: set[UsageBasis] = set()
+    stats = [workload.observed_cpu_per_pod] + [
+        container.observed_cpu for container in workload.containers or ()
+    ]
+    for stat in stats:
+        if stat is None:
+            continue
+        _, basis = stat.exposure()
+        if basis != "peak":
+            bases.add(basis)
+    return bases
+
+
+def _worst_case_share_m(
+    cpu_request_m: int,
+    node_request_total_m: int,
+    allocatable_cpu_m: int,
+    cpu_limit_m: int | None,
+) -> int:
+    """This unit's proportional share of one node if everything peaks at once.
+
+    Deliberately not a cpu.shares simulation: it flattens the pod and QoS cgroup
+    nesting a kubelet builds into a single proportional division, and assumes
+    every neighbor is runnable. That makes it a floor on the entitlement rather
+    than a forecast of what the container will get.
+
+    Never more than the node has. A pod request cannot exceed the node's own
+    total, but a *container* request can: the breakdown is deliberately not
+    cross-checked against the pod totals, so a container may claim more than the
+    pod it belongs to, and the raw ratio would then report a share larger than
+    the machine.
+    """
+    share_m = min(
+        cpu_request_m * allocatable_cpu_m // node_request_total_m,
+        allocatable_cpu_m,
+    )
+    if cpu_limit_m is None:
+        return share_m
+    return min(share_m, cpu_limit_m)
+
+
+_BASIS_PHRASES: dict[UsageBasis, str] = {
+    "peak": "peaks at",
+    "p95": "reaches a p95 of",
+    "avg": "averages",
+}
+
+
+@dataclass(frozen=True)
+class _Exposure:
+    """One (workload, container) aggregated over the contended nodes hosting it."""
+
+    borrower: _Borrower
+    replicas_affected: int
+    # How many contended nodes those replicas are spread over. Not reported on
+    # its own; it decides whether the flag's sentence says "a contended node" or
+    # "contended nodes", which several replicas on one node otherwise get wrong.
+    contended_node_count: int
+    worst_case_share_m: int
+
+
+def _aggregate_exposures(
+    contended_nodes: list[NodeAllocation],
+    workloads: dict[str, Workload],
+    allocatable_cpu_m: int,
+) -> dict[tuple[str, str | None], _Exposure]:
+    """Collapse the contended nodes into one entry per borrowing unit.
+
+    Node by node, then folded: the reading and the bound are constant per unit
+    on a given node — every replica of a workload has the same shape — so a node
+    contributes a replica count, one node to the spread, and one candidate for
+    the tightest bound.
+    """
+    if not contended_nodes:
+        return {}
+
+    # Constant per workload, and asked once per replica per node otherwise.
+    borrowers_by_workload = {
+        name: _borrowers(workload) for name, workload in workloads.items()
+    }
+
+    exposures: dict[tuple[str, str | None], _Exposure] = {}
+    for node in contended_nodes:
+        node_request_total_m = sum(pod.cpu_m for pod in node.pods)
+        replicas_here: dict[tuple[str, str | None], int] = {}
+        borrower_here: dict[tuple[str, str | None], _Borrower] = {}
+        for pod in node.pods:
+            for borrower in borrowers_by_workload[pod.workload_name]:
+                key = (pod.workload_name, borrower.container)
+                replicas_here[key] = replicas_here.get(key, 0) + 1
+                borrower_here[key] = borrower
+
+        for key, replicas in replicas_here.items():
+            borrower = borrower_here[key]
+            bound_m = _worst_case_share_m(
+                borrower.cpu_request_m,
+                node_request_total_m,
+                allocatable_cpu_m,
+                borrower.cpu_limit_m,
+            )
+            seen = exposures.get(key)
+            exposures[key] = _Exposure(
+                borrower=borrower,
+                replicas_affected=(
+                    replicas if seen is None else seen.replicas_affected + replicas
+                ),
+                contended_node_count=(
+                    1 if seen is None else seen.contended_node_count + 1
+                ),
+                worst_case_share_m=(
+                    bound_m if seen is None else min(seen.worst_case_share_m, bound_m)
+                ),
+            )
+    return exposures
+
+
+def _contention_flag(
+    workload_name: str,
+    exposure: _Exposure,
+    replicas_total: int,
+) -> ContentionFlag:
+    """One flag, including the sentence that carries every number on it."""
+    borrower = exposure.borrower
+    subject = (
+        workload_name
+        if borrower.container is None
+        else f"{borrower.container} in {workload_name}"
+    )
+    against = (
+        "no CPU request"
+        if borrower.cpu_request_m == 0
+        else f"a {borrower.cpu_request_m}m request"
+    )
+    noun = "replica" if replicas_total == 1 else "replicas"
+    verb = "shares" if exposure.replicas_affected == 1 else "share"
+    nodes = (
+        "a contended node" if exposure.contended_node_count == 1 else "contended nodes"
+    )
+    shared = f"{exposure.replicas_affected} of {replicas_total} {noun} {verb} {nodes}"
+    return ContentionFlag(
+        workload=workload_name,
+        container=borrower.container,
+        cpu_request_m=borrower.cpu_request_m,
+        usage_cpu_m=borrower.usage_cpu_m,
+        usage_basis=borrower.usage_basis,
+        replicas_affected=exposure.replicas_affected,
+        replicas_total=replicas_total,
+        worst_case_share_m=exposure.worst_case_share_m,
+        message=(
+            f"{subject} {_BASIS_PHRASES[borrower.usage_basis]} "
+            f"{borrower.usage_cpu_m}m against {against}; {shared}. "
+            f"Worst-case bound if every neighbor peaks at once: "
+            f"{exposure.worst_case_share_m}m."
+        ),
+    )
+
+
+def _basis_notes(
+    packed_nodes: list[NodeAllocation],
+    workloads: dict[str, Workload],
+) -> tuple[str, ...]:
+    """Zero to two one-liners saying what weakened the flags above.
+
+    Counted over every placed pod, not only the flagged ones: a reading that
+    fell back on a node that came out uncontended is precisely how contention
+    hides, which is what makes the whole block a lower bound.
+
+    The second note says *pod-level* deliberately. Node pressure is a pod-level
+    reading, so a workload carrying only a per-container breakdown still
+    contributes its request — saying it "had no usage data" would be false of
+    exactly that workload, which does have usage, at a level this sum does not
+    read.
+    """
+    placed = sorted({pod.workload_name for node in packed_nodes for pod in node.pods})
+    fallen_back = {
+        name: bases for name in placed if (bases := _fallback_bases(workloads[name]))
+    }
+    request_pods = sum(
+        1
+        for node in packed_nodes
+        for pod in node.pods
+        if _pod_reading(workloads[pod.workload_name])[1] is None
+    )
+
+    notes: list[str] = []
+    if fallen_back:
+        count = len(fallen_back)
+        subject = "workload" if count == 1 else "workloads"
+        used = " and ".join(
+            sorted({basis for bases in fallen_back.values() for basis in bases})
+        )
+        notes.append(
+            f"Peak unavailable for {count} {subject} — {used} used; "
+            f"contention here is a lower bound."
+        )
+    if request_pods == 1:
+        notes.append("1 pod had no pod-level usage data — its request was used.")
+    elif request_pods > 1:
+        notes.append(
+            f"{request_pods} pods had no pod-level usage data — "
+            f"their requests were used."
+        )
+    return tuple(notes)
+
+
+def _evaluate_cpu_contention(
+    machine: MachineSpec,
+    packed_nodes: list[NodeAllocation],
+    pods: list[PodRequest],
+    workloads: dict[str, Workload],
+) -> CpuContention | None:
+    """Flag the workloads on this packing that depend on borrowed CPU.
+
+    A node is contended when its placed pods together want more CPU than it can
+    schedule; the units on such a node observed above their own request are the
+    ones borrowing. `pods` is the pool's whole set, oversized pods included, and
+    supplies the replica totals the flags are reported against.
+    """
+    if not packed_nodes:
+        return None
+
+    allocatable_cpu_m = machine.allocatable_cpu_m
+    contended_nodes = [
+        node
+        for node in packed_nodes
+        if _node_cpu_usage_m(node, workloads) > allocatable_cpu_m
+    ]
+    exposures = _aggregate_exposures(contended_nodes, workloads, allocatable_cpu_m)
+
+    replicas_total: dict[str, int] = {}
+    for pod in pods:
+        replicas_total[pod.workload_name] = replicas_total.get(pod.workload_name, 0) + 1
+
+    # Sorted rather than emitted in placement order: a stable, packing-independent
+    # order lets the same workload be read across scenario tabs.
+    ordered = sorted(exposures, key=lambda key: (key[0], key[1] or ""))
+
+    return CpuContention(
+        nodes_evaluated=len(packed_nodes),
+        contended_node_count=len(contended_nodes),
+        flags=tuple(
+            _contention_flag(key[0], exposures[key], replicas_total[key[0]])
+            for key in ordered
+        ),
+        basis_notes=_basis_notes(packed_nodes, workloads),
+    )
+
+
 def _evaluate_pool_scenario(
     pool: NodePool,
     pods: list[PodRequest],
@@ -1209,10 +1650,11 @@ def _evaluate_pool_scenario(
 ) -> PoolScenarioResult:
     """Pack one pool's pods onto its machine shape and size the pool.
 
-    `workloads` is the seam for per-node runtime-risk analysis: the packer now
+    `workloads` is the seam for per-node runtime-risk analysis: the packer
     retains its placements, and reaching a placed pod's requests, limits, and
     observed usage means looking the pod's workload up by name. The sizing math
-    below reads neither, so this parameter moves no number today.
+    below reads neither — contention is additive context, not a new verdict
+    channel, so no node count moves because of it.
     """
     machine = pool.machine
 
@@ -1298,6 +1740,7 @@ def _evaluate_pool_scenario(
         oversized_pod_count=len(oversized_pods),
         pods_per_node=pods_per_node,
         fragmentation_resource=fragmentation_resource,
+        cpu_contention=_evaluate_cpu_contention(machine, packed_nodes, pods, workloads),
     )
 
 

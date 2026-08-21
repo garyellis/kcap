@@ -11,7 +11,9 @@ from kcap.engine import (
     ClusterConfig,
     ClusterResult,
     ContainerInfo,
+    CpuContention,
     MachineSpec,
+    NodeAllocation,
     NodePool,
     PodRequest,
     Resources,
@@ -20,6 +22,7 @@ from kcap.engine import (
     Workload,
     WorkloadResult,
     add_workload,
+    build_pods,
     compare_config,
     compare_results,
     evaluate,
@@ -27,6 +30,7 @@ from kcap.engine import (
     evaluate_scenario,
     min_replicas_for,
     remove_workload,
+    resolve_pool_name,
     update_cpu_limit,
     update_cpu_request,
     update_machine_cpu,
@@ -1023,54 +1027,138 @@ def placement_free_pack(
     return nodes, oversized
 
 
-class TestRetainedPlacements:
-    """The packer keeps its placements; nothing downstream reads them yet.
+def _node_math(result: ClusterResult) -> dict[str, object]:
+    """The whole ClusterResult with only the runtime-risk block removed."""
+    data = asdict(result)
+    for scenario in data["scenarios"].values():
+        for pool in scenario["pools"].values():
+            pool.pop("cpu_contention")
+    return data
 
-    Retention exists so runtime-risk analysis can ask who shares a node with
-    whom — the one fact aggregate arithmetic cannot recover. Until that analysis
-    lands, the placements must move no number at all.
+
+class TestRetainedPlacements:
+    """The packer keeps its placements, and only runtime-risk analysis reads them.
+
+    Retention exists so that analysis can ask who shares a node with whom — the
+    one fact aggregate arithmetic cannot recover. Until Phase 2 the placements
+    moved no number at all, and one test proved it by substituting a packer that
+    discarded them; that test was written to expire here, and it has. What
+    survives it is the pair below: the packer packs exactly as it did before
+    retention, and the analysis reading the placements moves no node number.
     """
 
-    def test_node_math_is_identical_without_retained_placements(
+    def test_retaining_placements_did_not_change_the_packing(
         self,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        """Regression proof that retaining placements is inert.
+        """The retained list is a by-product; the walk itself is untouched.
 
-        The representative multi-workload, multi-pool configuration is
-        evaluated twice: once through the shipped engine and once with
-        placement_free_pack() substituted for the packer, which packs the same
-        way onto nodes that discard what they hold. The comparison is over the
-        whole ClusterResult via dataclasses.asdict -- every field of all five
-        scenarios, per pool, plus every workload result.
+        placement_free_pack() is the pre-P1.5 packer, reproduced over nodes that
+        forget what they hold. Run over the same pods it must open the same
+        nodes, reject the same oversized pods, and leave each node holding the
+        same remainder. Pool sizing reads only the first two out of the packer;
+        the remainders are asserted as well because they are what says the two
+        walks placed the same pods, and not merely the same number of them.
 
-        The shadow stops at the packer deliberately. Copying the pool sizing
-        instead would duplicate P0.3's scale-down gate, go stale the moment a
-        later phase adds a field to PoolScenarioResult, and prove nothing the
-        substitution does not. Scoped this way the test also expires honestly:
-        the first phase whose analysis reads NodeAllocation.pods makes the
-        result genuinely depend on retention, and this test says so by failing.
+        The shadow can no longer be substituted into evaluate() -- contention
+        analysis genuinely needs the placements the shadow discards -- so the
+        comparison moved down to the packer, where the claim actually lives.
+        That move costs the guard the Session F review added, so it is taken
+        separately below: without it this compares two functions that evaluate()
+        may have stopped calling.
         """
         cluster = representative_cluster()
-        packs: list[int] = []
+        reached: list[int] = []
+        # Bound before the patch: reaching for it through the module inside the
+        # shim would find the shim.
+        shipped_pack = engine._pack_pods
 
         def counting_pack(
             machine: MachineSpec,
             pods: list[PodRequest],
-        ) -> tuple[list[_PlacementFreeNode], list[PodRequest]]:
-            packs.append(1)
-            return placement_free_pack(machine, pods)
+        ) -> tuple[list[NodeAllocation], list[PodRequest]]:
+            reached.append(len(pods))
+            return shipped_pack(machine, pods)
 
-        # Order is load-bearing: the shipped result must be taken before the
-        # packer is swapped, or the shadow is compared against itself.
-        shipped = asdict(evaluate(cluster))
         monkeypatch.setattr(engine, "_pack_pods", counting_pack)
+        evaluate(cluster)
+        monkeypatch.undo()
 
-        assert asdict(evaluate(cluster)) == shipped
-        # Without this the test passes vacuously the day _pack_pods stops
-        # being the function evaluate() reaches -- inlined, or bound at import
-        # by a new call site. Two pools x five scenarios.
-        assert len(packs) == 10, "the shadow packer was not the one that ran"
+        # Two pools x five scenarios. Counting the pods each call received, not
+        # the calls, so a fixture that stopped putting pods in one of the pools
+        # cannot leave this passing on empty comparisons.
+        assert len(reached) == 10, "_pack_pods is not the function evaluate() reaches"
+        assert all(reached), "a pool received no pods, so it compares nothing"
+
+        compared = 0
+        for scenario in evaluate(cluster).scenarios.values():
+            for pool_name, pool in cluster.node_pools.items():
+                pods = [
+                    pod
+                    for pod in build_pods(cluster, scenario.replicas)
+                    if resolve_pool_name(cluster, cluster.workloads[pod.workload_name])
+                    == pool_name
+                ]
+                shipped_nodes, shipped_oversized = engine._pack_pods(pool.machine, pods)
+                shadow_nodes, shadow_oversized = placement_free_pack(pool.machine, pods)
+
+                assert shipped_oversized == shadow_oversized
+                assert [
+                    (
+                        node.cpu_remaining_m,
+                        node.memory_remaining_mib,
+                        node.pods_remaining,
+                    )
+                    for node in shipped_nodes
+                ] == [
+                    (
+                        node.cpu_remaining_m,
+                        node.memory_remaining_mib,
+                        node.pods_remaining,
+                    )
+                    for node in shadow_nodes
+                ]
+                compared += 1
+
+        assert compared == 10
+
+    def test_contention_moves_no_node_number(self) -> None:
+        """Runtime risk is additive context, not a new verdict channel.
+
+        Every observed statistic in the fixture keeps its average and gains a
+        p95 and a peak far above it -- the same edit the HPA convention test
+        makes, which leaves every replica number alone and is enough to contend
+        the default pool. Not one field of any pool result outside
+        cpu_contention may move: if one did, a risk readout would be quietly
+        sizing the cluster.
+        """
+        plain = representative_cluster()
+        contended = replace(
+            plain,
+            workloads={
+                name: replace(
+                    workload,
+                    observed_cpu_per_pod=_with_tails(workload.observed_cpu_per_pod),
+                    observed_memory_per_pod=_with_tails(
+                        workload.observed_memory_per_pod
+                    ),
+                )
+                for name, workload in plain.workloads.items()
+            },
+        )
+
+        contended_result = evaluate(contended)
+        flagged = [
+            flag
+            for scenario in contended_result.scenarios.values()
+            for pool in scenario.pools.values()
+            if pool.cpu_contention is not None
+            for flag in pool.cpu_contention.flags
+        ]
+
+        # The premise: without flags this test would prove nothing.
+        assert flagged
+        assert _node_math(contended_result) == _node_math(evaluate(plain))
 
     def test_every_placed_pod_is_retained_on_the_node_that_holds_it(self) -> None:
         machine = MachineSpec(cpu_m=4000, memory_mib=8192, max_pods=110)
@@ -1117,6 +1205,21 @@ def _with_tails(stat: UsageStat | None) -> UsageStat | None:
     return replace(stat, p95=stat.avg * 2 + 7, peak=stat.avg * 3 + 11)
 
 
+def _hpa_numbers(result: ClusterResult) -> object:
+    """Everything the avg-only HPA convention decides.
+
+    Both utilization percentages, every replica number the HPA produced, the
+    surge, and the replica counts each scenario expanded into pods. Contention
+    analysis reads `peak`, so whole-result equality across added statistics
+    stopped being true when it landed; this is the part of the claim that is
+    still exactly right, and still the one worth pinning.
+    """
+    return (
+        {name: asdict(workload) for name, workload in result.workloads.items()},
+        {name: dict(scenario.replicas) for name, scenario in result.scenarios.items()},
+    )
+
+
 class TestUsageStatistics:
     """Observed usage is a distribution summary; HPA still reads its average.
 
@@ -1160,7 +1263,7 @@ class TestUsageStatistics:
 
         assert average_only.workloads["api"].cpu_utilization_percent == 80
         assert average_only.workloads["api"].desired_replicas == 5
-        assert asdict(average_only) == asdict(with_tail)
+        assert _hpa_numbers(average_only) == _hpa_numbers(with_tail)
 
     def test_average_only_stats_evaluate_identically_to_the_scalar_engine(
         self,
@@ -1190,12 +1293,20 @@ class TestUsageStatistics:
             scalar_usage_evaluate(cluster, scalars)
         )
 
-    def test_adding_tail_statistics_moves_nothing_in_the_whole_result(
+    def test_adding_tail_statistics_moves_no_hpa_or_replica_number(
         self,
     ) -> None:
         # The convention across the full multi-workload, multi-pool fixture:
         # give every observed statistic a p95 and a peak well above its
-        # average, and no number anywhere in the result may move.
+        # average, and no HPA or replica number may move.
+        #
+        # This asserted the whole ClusterResult until entitlement analysis
+        # landed. That analysis reads `peak` by design, so "moves nothing at
+        # all" is now false — and would be a bug if it were true. What the
+        # convention actually claims is that the tail statistics never reach
+        # the replica math, which is what _hpa_numbers compares. The node math
+        # under the same edit is pinned separately, by
+        # TestRetainedPlacements.test_contention_moves_no_node_number.
         plain = representative_cluster()
         with_tails = replace(
             plain,
@@ -1211,22 +1322,24 @@ class TestUsageStatistics:
             },
         )
 
-        assert asdict(evaluate(plain)) == asdict(evaluate(with_tails))
+        assert _hpa_numbers(evaluate(plain)) == _hpa_numbers(evaluate(with_tails))
 
 
 class TestContainerBreakdown:
-    """Per-container detail is analysis-only, validated lightly, and inert.
+    """Per-container detail is analysis-only and validated lightly.
 
     Pod-level Resources stays the single source of truth for packing, HPA math,
-    and validation; nothing downstream reads this list yet.
+    and validation. Entitlement analysis reads the breakdown -- it is the only
+    thing that does, and it is what the list was added for -- so the claim below
+    is that a breakdown moves no *node* number, not that it moves nothing.
     """
 
-    def test_containers_move_nothing_in_the_whole_result(self) -> None:
+    def test_containers_move_no_node_number(self) -> None:
         # Every workload in the multi-workload, multi-pool fixture gains a
         # breakdown whose numbers deliberately disagree with its pod totals --
         # a sidecar the pod request never counted, a limit the pod does not
-        # carry, usage far above the average the HPA reads. No number anywhere
-        # in the result may move.
+        # carry, usage far above the average the HPA reads. No number outside
+        # the runtime-risk block may move.
         plain = representative_cluster()
         with_containers = replace(
             plain,
@@ -1248,7 +1361,7 @@ class TestContainerBreakdown:
             },
         )
 
-        assert asdict(evaluate(plain)) == asdict(evaluate(with_containers))
+        assert _node_math(evaluate(plain)) == _node_math(evaluate(with_containers))
 
     def test_a_breakdown_is_not_cross_checked_against_the_pod_totals(self) -> None:
         # The pod numbers are effective requests, so an init container can set
@@ -1352,6 +1465,820 @@ class TestContainerBreakdown:
 
         with pytest.raises(ValueError, match="api/istio-proxy"):
             validate(cluster)
+
+
+# A 4000m / 8192MiB node with nothing reserved, so allocatable CPU is a round
+# 4000m and every bound below can be read off the numbers in the test.
+CONTENTION_MACHINE = MachineSpec(cpu_m=4000, memory_mib=8192)
+
+
+def contention_cluster(*workloads: Workload) -> ClusterConfig:
+    """One pool of CONTENTION_MACHINE nodes holding the given workloads."""
+    return ClusterConfig(
+        workloads={workload.name: workload for workload in workloads},
+        node_pools={
+            "default": NodePool(
+                name="default",
+                machine=CONTENTION_MACHINE,
+                min_nodes=1,
+                current_nodes=2,
+                max_nodes=10,
+            ),
+        },
+    )
+
+
+def contention_of(cluster: ClusterConfig, **replicas: int) -> CpuContention:
+    """The default pool's contention for one hand-chosen replica set."""
+    contention = (
+        evaluate_scenario("current", cluster, replicas).pools["default"].cpu_contention
+    )
+    assert contention is not None, "the pool placed no pods"
+    return contention
+
+
+class TestCpuContention:
+    """Entitlement-based CPU contention over the retained placements.
+
+    The model is an entitlement one, not a simulation: a unit's guaranteed floor
+    is its CPU request, a node is contended when its placed pods' exposure-basis
+    usage outruns allocatable CPU, and everything above the floor on such a node
+    exists only while neighbors are idle.
+    """
+
+    def test_a_contended_node_flags_only_the_pod_above_its_request(self) -> None:
+        # 3500 + 1000 = 4500m of peak against 4000m allocatable, so the node is
+        # contended -- and batch, peaking at a third of what it reserved, is not
+        # the one borrowing.
+        cluster = contention_cluster(
+            Workload(
+                name="web",
+                resources=Resources(1000, 256),
+                current_replicas=1,
+                observed_cpu_per_pod=UsageStat(avg=100, peak=3500),
+            ),
+            Workload(
+                name="batch",
+                resources=Resources(3000, 256),
+                current_replicas=1,
+                observed_cpu_per_pod=UsageStat(avg=100, peak=1000),
+            ),
+        )
+
+        contention = contention_of(cluster, web=1, batch=1)
+
+        assert contention.nodes_evaluated == 1
+        assert contention.contended_node_count == 1
+        assert [flag.workload for flag in contention.flags] == ["web"]
+
+        flag = contention.flags[0]
+        assert flag.container is None
+        assert (flag.cpu_request_m, flag.usage_cpu_m, flag.usage_basis) == (
+            1000,
+            3500,
+            "peak",
+        )
+        assert (flag.replicas_affected, flag.replicas_total) == (1, 1)
+        # The node's requests fill it exactly, so web's proportional share is
+        # its own request: 1000 / 4000 x 4000m.
+        assert flag.worst_case_share_m == 1000
+        assert flag.message == (
+            "web peaks at 3500m against a 1000m request; "
+            "1 of 1 replica shares a contended node. "
+            "Worst-case bound if every neighbor peaks at once: 1000m."
+        )
+        assert contention.basis_notes == ()
+
+    def test_a_node_whose_peaks_fit_flags_nothing(self) -> None:
+        # Same pods, web peaking at 2000m: still twice its request, but
+        # 2000 + 1000 fits inside 4000m. Contention is a property of the node,
+        # not of the pod, and this is what makes that assertable.
+        cluster = contention_cluster(
+            Workload(
+                name="web",
+                resources=Resources(1000, 256),
+                current_replicas=1,
+                observed_cpu_per_pod=UsageStat(avg=100, peak=2000),
+            ),
+            Workload(
+                name="batch",
+                resources=Resources(3000, 256),
+                current_replicas=1,
+                observed_cpu_per_pod=UsageStat(avg=100, peak=1000),
+            ),
+        )
+
+        contention = contention_of(cluster, web=1, batch=1)
+
+        assert contention.nodes_evaluated == 1
+        assert contention.contended_node_count == 0
+        assert contention.flags == ()
+
+    def test_the_bound_is_capped_at_the_cpu_limit(self) -> None:
+        # The node's requests total 1000m of 4000m allocatable, so each pod's
+        # proportional share is 2000m -- four times what it reserved. web's
+        # 700m limit is what it can actually use, so the bound stops there;
+        # batch, unlimited, keeps the full share.
+        cluster = contention_cluster(
+            Workload(
+                name="web",
+                resources=Resources(500, 256, cpu_limit_m=700),
+                current_replicas=1,
+                observed_cpu_per_pod=UsageStat(avg=100, peak=3000),
+            ),
+            Workload(
+                name="batch",
+                resources=Resources(500, 256),
+                current_replicas=1,
+                observed_cpu_per_pod=UsageStat(avg=100, peak=1500),
+            ),
+        )
+
+        contention = contention_of(cluster, web=1, batch=1)
+
+        bounds = {flag.workload: flag.worst_case_share_m for flag in contention.flags}
+        assert bounds == {"web": 700, "batch": 2000}
+
+    def test_the_bound_is_the_minimum_across_the_contended_nodes(self) -> None:
+        # web's two replicas land on different nodes: one beside a 3500m
+        # neighbor (node requests total 4000m, share 500m), one beside a 2500m
+        # neighbor (total 3000m, share 666m). The bound is a worst case, so the
+        # tighter node decides.
+        cluster = contention_cluster(
+            Workload(
+                name="big",
+                resources=Resources(3500, 256),
+                current_replicas=1,
+                observed_cpu_per_pod=UsageStat(avg=100, peak=3900),
+            ),
+            Workload(
+                name="mid",
+                resources=Resources(2500, 256),
+                current_replicas=1,
+                observed_cpu_per_pod=UsageStat(avg=100, peak=3900),
+            ),
+            Workload(
+                name="web",
+                resources=Resources(500, 256),
+                current_replicas=2,
+                observed_cpu_per_pod=UsageStat(avg=100, peak=2000),
+            ),
+        )
+
+        contention = contention_of(cluster, big=1, mid=1, web=2)
+
+        assert contention.contended_node_count == 2
+        bounds = {flag.workload: flag.worst_case_share_m for flag in contention.flags}
+        # 666 is the share on the roomier node; taking it would understate the
+        # worst case, and 500 is the number the operator has to plan against.
+        assert bounds["web"] == 500
+        # Two replicas over two contended nodes, so the sentence says nodes.
+        web = next(flag for flag in contention.flags if flag.workload == "web")
+        assert "2 of 2 replicas share contended nodes" in web.message
+
+    def test_the_minimum_is_not_merely_the_first_node_visited(self) -> None:
+        """The tighter node decides even when it is packed second.
+
+        First-fit-decreasing usually opens its fullest node first, so `min` and
+        "keep the first value" normally agree and a plain two-node fixture
+        cannot tell them apart. Memory separates them: `memhog` claims almost
+        all of node one's memory and only 100m of its CPU, so `cpubig` is pushed
+        onto a second node that ends up carrying five times node one's CPU
+        requests. web has a replica on each.
+
+        node one: 600m of requests, so web's share is 500/600 x 4000 = 3333m.
+        node two: 2500m of requests, so its share is 500/2500 x 4000 = 800m.
+        Keeping the first value would report 3333m -- four times the entitlement
+        the operator can actually count on.
+        """
+        cluster = ClusterConfig(
+            workloads={
+                "memhog": Workload(
+                    name="memhog",
+                    resources=Resources(100, 900),
+                    current_replicas=1,
+                    observed_cpu_per_pod=UsageStat(avg=100, peak=1500),
+                ),
+                "cpubig": Workload(
+                    name="cpubig",
+                    resources=Resources(2000, 300),
+                    current_replicas=1,
+                    observed_cpu_per_pod=UsageStat(avg=100, peak=2100),
+                ),
+                "web": Workload(
+                    name="web",
+                    resources=Resources(500, 60),
+                    current_replicas=2,
+                    observed_cpu_per_pod=UsageStat(avg=100, peak=3000),
+                ),
+            },
+            node_pools={
+                "default": NodePool(
+                    name="default",
+                    machine=MachineSpec(cpu_m=4000, memory_mib=1000),
+                    min_nodes=1,
+                    current_nodes=2,
+                    max_nodes=10,
+                ),
+            },
+        )
+
+        contention = contention_of(cluster, memhog=1, cpubig=1, web=2)
+
+        assert contention.contended_node_count == 2
+        web = next(flag for flag in contention.flags if flag.workload == "web")
+        assert web.worst_case_share_m == 800
+
+    def test_replicas_are_counted_against_the_workload_not_the_node(self) -> None:
+        # Five web replicas: one shares a node with the hog and is exposed, four
+        # share a node with each other and are not. The flag is aggregated per
+        # workload, so it has to say which fraction is affected.
+        cluster = contention_cluster(
+            Workload(
+                name="hog",
+                resources=Resources(3500, 256),
+                current_replicas=1,
+                observed_cpu_per_pod=UsageStat(avg=100, peak=3900),
+            ),
+            Workload(
+                name="web",
+                resources=Resources(500, 256),
+                current_replicas=5,
+                observed_cpu_per_pod=UsageStat(avg=100, peak=900),
+            ),
+        )
+
+        contention = contention_of(cluster, hog=1, web=5)
+
+        assert contention.nodes_evaluated == 2
+        assert contention.contended_node_count == 1
+        web = next(flag for flag in contention.flags if flag.workload == "web")
+        assert (web.replicas_affected, web.replicas_total) == (1, 5)
+        assert "1 of 5 replicas shares a contended node" in web.message
+
+    def test_a_missing_peak_falls_back_to_avg_and_says_so(self) -> None:
+        cluster = contention_cluster(
+            Workload(
+                name="web",
+                resources=Resources(1000, 256),
+                current_replicas=1,
+                observed_cpu_per_pod=UsageStat(avg=3500),
+            ),
+            Workload(
+                name="batch",
+                resources=Resources(3000, 256),
+                current_replicas=1,
+                observed_cpu_per_pod=UsageStat(avg=1000),
+            ),
+        )
+
+        contention = contention_of(cluster, web=1, batch=1)
+
+        flag = contention.flags[0]
+        assert (flag.usage_basis, flag.usage_cpu_m) == ("avg", 3500)
+        assert flag.message.startswith("web averages 3500m against a 1000m request;")
+        # Both workloads fell back, including the one that did not flag: a
+        # reading that fell back on a node that came out uncontended is exactly
+        # how contention hides, which is what makes this a lower bound.
+        assert contention.basis_notes == (
+            "Peak unavailable for 2 workloads — avg used; "
+            "contention here is a lower bound.",
+        )
+
+    def test_a_pod_with_no_usage_contributes_its_request_and_is_counted(self) -> None:
+        # The scheduler's own assumption, so missing data can neither hide
+        # contention nor fabricate it: batch is credited with the 1000m it
+        # reserved, which is enough to tip the node, and it is never flagged
+        # because nothing observed it above that.
+        cluster = contention_cluster(
+            Workload(
+                name="web",
+                resources=Resources(1000, 256),
+                current_replicas=1,
+                observed_cpu_per_pod=UsageStat(avg=100, peak=3500),
+            ),
+            Workload(
+                name="batch",
+                resources=Resources(1000, 256),
+                current_replicas=2,
+            ),
+        )
+
+        contention = contention_of(cluster, web=1, batch=2)
+
+        assert contention.contended_node_count == 1
+        assert [flag.workload for flag in contention.flags] == ["web"]
+        assert contention.basis_notes == (
+            "2 pods had no pod-level usage data — their requests were used.",
+        )
+
+    def test_flags_name_containers_only_when_a_breakdown_is_present(self) -> None:
+        # Pod-level is the norm rather than a degraded mode, so the same pod is
+        # evaluated both ways. The node sum is identical in each: it is summed
+        # from pod contributions, and a container's usage is already inside its
+        # pod's figure.
+        def cluster_for(containers: tuple[ContainerInfo, ...] | None) -> ClusterConfig:
+            return contention_cluster(
+                Workload(
+                    name="payments",
+                    resources=Resources(1000, 256),
+                    current_replicas=1,
+                    observed_cpu_per_pod=UsageStat(avg=300, peak=3500),
+                    containers=containers,
+                ),
+                Workload(
+                    name="batch",
+                    resources=Resources(3000, 256),
+                    current_replicas=1,
+                    observed_cpu_per_pod=UsageStat(avg=100, peak=1000),
+                ),
+            )
+
+        pod_level = contention_of(cluster_for(None), payments=1, batch=1)
+        assert [(flag.workload, flag.container) for flag in pod_level.flags] == [
+            ("payments", None)
+        ]
+
+        per_container = contention_of(
+            cluster_for(
+                (
+                    ContainerInfo(
+                        name="app",
+                        cpu_request_m=900,
+                        observed_cpu=UsageStat(avg=200, peak=800),
+                    ),
+                    ContainerInfo(
+                        name="istio-proxy",
+                        cpu_request_m=19,
+                        observed_cpu=UsageStat(avg=100, peak=2700),
+                    ),
+                )
+            ),
+            payments=1,
+            batch=1,
+        )
+
+        # Spelled out, not compared: two equal values could both be wrong, and
+        # the claim is that the breakdown does not move the node sum.
+        assert pod_level.contended_node_count == 1
+        assert per_container.contended_node_count == 1
+        # app stays inside its request; the sidecar is the one borrowing, which
+        # is the whole reason the breakdown exists.
+        assert [(flag.workload, flag.container) for flag in per_container.flags] == [
+            ("payments", "istio-proxy")
+        ]
+        flag = per_container.flags[0]
+        assert (flag.cpu_request_m, flag.usage_cpu_m) == (19, 2700)
+        assert flag.worst_case_share_m == 19
+        assert flag.message == (
+            "istio-proxy in payments peaks at 2700m against a 19m request; "
+            "1 of 1 replica shares a contended node. "
+            "Worst-case bound if every neighbor peaks at once: 19m."
+        )
+
+    def test_container_usage_is_not_added_into_the_node_sum(self) -> None:
+        # Node pressure is summed from pod contributions only. A container's
+        # usage is already inside its pod's figure, so counting it again would
+        # invent load: here the two containers would double the node's reading
+        # and tip a node that genuinely fits.
+        cluster = contention_cluster(
+            Workload(
+                name="web",
+                resources=Resources(1000, 256),
+                current_replicas=1,
+                observed_cpu_per_pod=UsageStat(avg=100, peak=2000),
+                containers=(
+                    ContainerInfo(
+                        name="app",
+                        cpu_request_m=900,
+                        observed_cpu=UsageStat(avg=100, peak=1500),
+                    ),
+                    ContainerInfo(
+                        name="istio-proxy",
+                        cpu_request_m=19,
+                        observed_cpu=UsageStat(avg=100, peak=1500),
+                    ),
+                ),
+            ),
+            Workload(
+                name="batch",
+                resources=Resources(3000, 256),
+                current_replicas=1,
+                observed_cpu_per_pod=UsageStat(avg=100, peak=1000),
+            ),
+        )
+
+        contention = contention_of(cluster, web=1, batch=1)
+
+        # 2000 + 1000 against 4000m allocatable. Adding the containers would
+        # read 6000m and flag both of them.
+        assert contention.contended_node_count == 0
+        assert contention.flags == ()
+
+    def test_a_breakdown_without_usage_falls_back_to_the_pod_reading(self) -> None:
+        # Present-but-usage-less says nothing a container comparison could use,
+        # so it degrades to pod-level exactly as an absent list does.
+        cluster = contention_cluster(
+            Workload(
+                name="web",
+                resources=Resources(1000, 256),
+                current_replicas=1,
+                observed_cpu_per_pod=UsageStat(avg=100, peak=3500),
+                containers=(
+                    ContainerInfo(name="app", cpu_request_m=981),
+                    ContainerInfo(name="istio-proxy", cpu_request_m=19),
+                ),
+            ),
+            Workload(
+                name="batch",
+                resources=Resources(3000, 256),
+                current_replicas=1,
+                observed_cpu_per_pod=UsageStat(avg=100, peak=1000),
+            ),
+        )
+
+        contention = contention_of(cluster, web=1, batch=1)
+
+        assert [(flag.workload, flag.container) for flag in contention.flags] == [
+            ("web", None)
+        ]
+
+    def test_a_breakdown_that_names_nobody_falls_back_to_the_pod(self) -> None:
+        """A breakdown can refine a flag; it must never erase one.
+
+        This is the injected-sidecar shape the importer deliberately produces: a
+        container with no spec counterpart is not merged into one that exists, so
+        its usage reaches the pod figure and nothing else. Here the pod peaks at
+        3500m against a 1000m request and contends the node, while both listed
+        containers sit inside their own requests -- the 2600m nobody declared is
+        the whole point. Reporting only the containers would have this node
+        contended and flagged by nothing, and would mean that adding a breakdown
+        *removes* a flag pod-level analysis had already raised.
+        """
+        cluster = contention_cluster(
+            Workload(
+                name="web",
+                resources=Resources(1000, 256),
+                current_replicas=1,
+                observed_cpu_per_pod=UsageStat(avg=100, peak=3500),
+                containers=(
+                    ContainerInfo(
+                        name="app",
+                        cpu_request_m=981,
+                        observed_cpu=UsageStat(avg=100, peak=900),
+                    ),
+                    ContainerInfo(
+                        name="istio-proxy",
+                        cpu_request_m=19,
+                        observed_cpu=UsageStat(avg=5, peak=10),
+                    ),
+                ),
+            ),
+            Workload(
+                name="batch",
+                resources=Resources(3000, 256),
+                current_replicas=1,
+                observed_cpu_per_pod=UsageStat(avg=100, peak=1000),
+            ),
+        )
+
+        contention = contention_of(cluster, web=1, batch=1)
+
+        assert contention.contended_node_count == 1
+        assert [(flag.workload, flag.container) for flag in contention.flags] == [
+            ("web", None)
+        ]
+        assert contention.flags[0].usage_cpu_m == 3500
+
+    def test_a_contended_node_always_produces_at_least_one_flag(self) -> None:
+        """The invariant that makes an empty flag list mean "all clear".
+
+        Requests always fit the node -- that is what packing enforces -- and a
+        pod with no reading contributes exactly its request. So a node whose
+        contributions outrun allocatable must hold a pod observed above its own
+        request, and something has to say so. A silent contended node would read
+        on screen as no finding at all.
+
+        Checked over the shapes that could break it rather than one fixture:
+        pod-level only, a breakdown that names the borrower, and a breakdown
+        that names nobody.
+        """
+        borrower = Workload(
+            name="web",
+            resources=Resources(1000, 256),
+            current_replicas=1,
+            observed_cpu_per_pod=UsageStat(avg=100, peak=3500),
+        )
+        breakdowns: list[tuple[ContainerInfo, ...] | None] = [
+            None,
+            (
+                ContainerInfo(
+                    name="app",
+                    cpu_request_m=19,
+                    observed_cpu=UsageStat(avg=100, peak=3400),
+                ),
+            ),
+            (
+                ContainerInfo(
+                    name="app",
+                    cpu_request_m=1000,
+                    observed_cpu=UsageStat(avg=100, peak=900),
+                ),
+            ),
+        ]
+
+        for containers in breakdowns:
+            cluster = contention_cluster(
+                replace(borrower, containers=containers),
+                Workload(
+                    name="batch",
+                    resources=Resources(3000, 256),
+                    current_replicas=1,
+                    observed_cpu_per_pod=UsageStat(avg=100, peak=1000),
+                ),
+            )
+
+            contention = contention_of(cluster, web=1, batch=1)
+
+            assert contention.contended_node_count == 1
+            assert contention.flags, f"contended node, no flag, for {containers}"
+
+    def test_a_workload_measured_only_per_container_contributes_its_request(
+        self,
+    ) -> None:
+        """Node pressure is a pod-level reading, and the note says so.
+
+        Per-container peaks do not sum -- the maximum of a sum is not the sum of
+        the maxima -- so kcap will not build a pod figure out of them, and this
+        workload contributes the request instead. That is honest but it is a
+        real limit: the container is observed at 3500m and the node reads as
+        fitting. The note therefore has to say *pod-level*, because "had no
+        usage data" would be false of exactly this workload.
+
+        Nothing kcap builds produces this shape -- the importer sets both levels
+        from the same metrics, and the editor drops the breakdown on a pod edit
+        -- but the API accepts it, so its output must not lie.
+        """
+        cluster = contention_cluster(
+            Workload(
+                name="web",
+                resources=Resources(1000, 256),
+                current_replicas=1,
+                containers=(
+                    ContainerInfo(
+                        name="app",
+                        cpu_request_m=1000,
+                        observed_cpu=UsageStat(avg=3500),
+                    ),
+                ),
+            ),
+            Workload(
+                name="batch",
+                resources=Resources(3000, 256),
+                current_replicas=1,
+                observed_cpu_per_pod=UsageStat(avg=100, peak=3000),
+            ),
+        )
+
+        contention = contention_of(cluster, web=1, batch=1)
+
+        # 1000m of request plus batch's 3000m peak is exactly allocatable.
+        assert contention.contended_node_count == 0
+        assert contention.basis_notes == (
+            "Peak unavailable for 1 workload — avg used; "
+            "contention here is a lower bound.",
+            "1 pod had no pod-level usage data — its request was used.",
+        )
+
+    def test_the_bound_never_exceeds_what_the_node_has(self) -> None:
+        # A container may claim more CPU than the pod it belongs to: the
+        # breakdown is deliberately not cross-checked against the pod totals,
+        # since those are effective requests. The raw ratio would report 30x the
+        # machine here, which is not a bound on anything.
+        cluster = contention_cluster(
+            Workload(
+                name="web",
+                resources=Resources(100, 256),
+                current_replicas=1,
+                observed_cpu_per_pod=UsageStat(avg=100, peak=4500),
+                containers=(
+                    ContainerInfo(
+                        name="app",
+                        cpu_request_m=3000,
+                        observed_cpu=UsageStat(avg=100, peak=3500),
+                    ),
+                ),
+            ),
+        )
+
+        contention = contention_of(cluster, web=1)
+
+        assert contention.flags[0].worst_case_share_m == 4000
+
+    def test_a_p95_basis_reaches_both_the_message_and_the_note(self) -> None:
+        # p95 is file-only in the UI, so it is the basis least likely to be
+        # exercised by hand and the easiest to leave unworded.
+        cluster = contention_cluster(
+            Workload(
+                name="web",
+                resources=Resources(1000, 256),
+                current_replicas=1,
+                observed_cpu_per_pod=UsageStat(avg=200, p95=3500),
+            ),
+            Workload(
+                name="batch",
+                resources=Resources(3000, 256),
+                current_replicas=1,
+                observed_cpu_per_pod=UsageStat(avg=100, peak=1000),
+            ),
+        )
+
+        contention = contention_of(cluster, web=1, batch=1)
+
+        flag = contention.flags[0]
+        assert flag.usage_basis == "p95"
+        assert flag.message.startswith("web reaches a p95 of 3500m against a 1000m ")
+        assert contention.basis_notes == (
+            "Peak unavailable for 1 workload — p95 used; "
+            "contention here is a lower bound.",
+        )
+
+    def test_both_kinds_of_note_can_fire_at_once(self) -> None:
+        # The §4 bar is at most two lines, and this is the shape that reaches
+        # it: one workload measured but without a peak, one not measured at all.
+        cluster = contention_cluster(
+            Workload(
+                name="web",
+                resources=Resources(1000, 256),
+                current_replicas=1,
+                observed_cpu_per_pod=UsageStat(avg=3500),
+            ),
+            Workload(
+                name="batch",
+                resources=Resources(1000, 256),
+                current_replicas=1,
+            ),
+        )
+
+        contention = contention_of(cluster, web=1, batch=1)
+
+        assert contention.basis_notes == (
+            "Peak unavailable for 1 workload — avg used; "
+            "contention here is a lower bound.",
+            "1 pod had no pod-level usage data — its request was used.",
+        )
+
+    def test_a_container_with_no_request_is_flagged_on_any_usage(self) -> None:
+        """The pinned choice for a container that declared neither request nor limit.
+
+        Its floor really is zero, so every millicore it uses is borrowed. kcap
+        flags it on the same `usage > request` rule every other unit gets rather
+        than exempting it below some threshold: nothing in this analysis filters
+        by magnitude -- a 20m container against a 19m request already flags --
+        and a rule that silenced the units with *no* floor would hide the most
+        exposed shape on the node. The magnitude is in the row for the reader.
+        """
+        cluster = contention_cluster(
+            Workload(
+                name="web",
+                resources=Resources(1000, 256),
+                current_replicas=1,
+                observed_cpu_per_pod=UsageStat(avg=100, peak=3500),
+                containers=(
+                    ContainerInfo(
+                        name="app",
+                        cpu_request_m=1000,
+                        observed_cpu=UsageStat(avg=100, peak=900),
+                    ),
+                    ContainerInfo(
+                        name="debug-sidecar",
+                        observed_cpu=UsageStat(avg=1, peak=5),
+                    ),
+                ),
+            ),
+            Workload(
+                name="batch",
+                resources=Resources(3000, 256),
+                current_replicas=1,
+                observed_cpu_per_pod=UsageStat(avg=100, peak=1000),
+            ),
+        )
+
+        contention = contention_of(cluster, web=1, batch=1)
+
+        assert [flag.container for flag in contention.flags] == ["debug-sidecar"]
+        flag = contention.flags[0]
+        assert (flag.cpu_request_m, flag.worst_case_share_m) == (0, 0)
+        assert flag.message.startswith("debug-sidecar in web peaks at 5m against no ")
+
+    def test_flags_come_out_in_a_stable_order(self) -> None:
+        # Sorted by workload, then container, rather than emitted in placement
+        # order: the same workload has to be findable in the same place when the
+        # operator moves between scenario tabs.
+        cluster = contention_cluster(
+            Workload(
+                name="zeta",
+                resources=Resources(1000, 256),
+                current_replicas=1,
+                observed_cpu_per_pod=UsageStat(avg=100, peak=2500),
+            ),
+            Workload(
+                name="alpha",
+                resources=Resources(1000, 256),
+                current_replicas=1,
+                observed_cpu_per_pod=UsageStat(avg=100, peak=2500),
+                containers=(
+                    ContainerInfo(
+                        name="sidecar", observed_cpu=UsageStat(avg=10, peak=40)
+                    ),
+                    ContainerInfo(
+                        name="app", observed_cpu=UsageStat(avg=100, peak=2400)
+                    ),
+                ),
+            ),
+        )
+
+        contention = contention_of(cluster, zeta=1, alpha=1)
+
+        assert [(flag.workload, flag.container) for flag in contention.flags] == [
+            ("alpha", "app"),
+            ("alpha", "sidecar"),
+            ("zeta", None),
+        ]
+
+    def test_a_pool_that_placed_nothing_reports_no_contention(self) -> None:
+        # No node was opened, so there is no node that could be contended --
+        # distinct from an all-clear, which is a node that was checked.
+        cluster = contention_cluster(
+            Workload(
+                name="web",
+                resources=Resources(1000, 256),
+                current_replicas=0,
+                observed_cpu_per_pod=UsageStat(avg=100, peak=3500),
+            ),
+        )
+
+        result = evaluate_scenario("current", cluster, {"web": 0})
+
+        assert result.pools["default"].cpu_contention is None
+
+    def test_an_oversized_pod_is_on_no_node_and_contends_nothing(self) -> None:
+        # Oversized pods are excluded from packing entirely, so they sit on no
+        # NodeAllocation and cannot tip one -- even at a peak far past the
+        # machine. The pool still has a packed node, from the pods that fit.
+        cluster = contention_cluster(
+            Workload(
+                name="huge",
+                resources=Resources(9000, 256),
+                current_replicas=1,
+                observed_cpu_per_pod=UsageStat(avg=100, peak=9000),
+            ),
+            Workload(
+                name="web",
+                resources=Resources(1000, 256),
+                current_replicas=1,
+                observed_cpu_per_pod=UsageStat(avg=100, peak=2000),
+            ),
+        )
+
+        contention = contention_of(cluster, huge=1, web=1)
+
+        assert contention.nodes_evaluated == 1
+        assert contention.contended_node_count == 0
+        assert contention.flags == ()
+
+    def test_a_daemonset_reservation_leaves_the_node_sum_alone(self) -> None:
+        # NodeAllocation's remaining figures start from allocatable, so the
+        # reservation is outside this arithmetic: contention is measured against
+        # what workload pods can actually be scheduled, and the DaemonSet's own
+        # usage is not in any placed pod's figure.
+        cluster = ClusterConfig(
+            workloads={
+                "web": Workload(
+                    name="web",
+                    resources=Resources(1000, 256),
+                    current_replicas=1,
+                    observed_cpu_per_pod=UsageStat(avg=100, peak=3500),
+                ),
+            },
+            node_pools={
+                "default": NodePool(
+                    name="default",
+                    machine=MachineSpec(
+                        cpu_m=4000, memory_mib=8192, reserved_cpu_m=1000
+                    ),
+                    min_nodes=1,
+                    current_nodes=2,
+                    max_nodes=10,
+                ),
+            },
+        )
+
+        contention = contention_of(cluster, web=1)
+
+        # 3500m against 3000m of allocatable, not against the machine's 4000m.
+        assert contention.contended_node_count == 1
+        assert contention.flags[0].worst_case_share_m == 3000
 
 
 class TestRolloutAbsoluteSurge:

@@ -173,6 +173,105 @@ export type ContainerInfoSchema = {
 };
 
 /**
+ * ContentionFlagSchema
+ *
+ * One workload — or one container inside it — living on borrowed CPU.
+ *
+ * An entitlement claim, not a prediction: the guaranteed floor is the CPU
+ * request, and everything observed above it exists only while neighbors are
+ * idle.
+ */
+export type ContentionFlagSchema = {
+    /**
+     * Container
+     *
+     * Which container inside the pod is borrowing. Null means the flag is pod-level, which is the common case rather than a degraded one: kcap's editor is pod-level, so a hand-built workload carries no per-container breakdown and an edited one has had its breakdown dropped.
+     */
+    container: string | null;
+    /**
+     * Cpu Request M
+     *
+     * The guaranteed floor this reading is measured against, in millicores. 0 for a container that declared neither a request nor a limit: upstream still grants it the minimum two CPU shares rather than none, which is a floor of effectively zero, so any usage at all is borrowed.
+     */
+    cpu_request_m: number;
+    /**
+     * Message
+     *
+     * One plain sentence carrying the numbers above, composed by the engine so every consumer reports contention identically.
+     */
+    message: string;
+    /**
+     * Replicas Affected
+     *
+     * Replicas of this workload sharing a contended node.
+     */
+    replicas_affected: number;
+    /**
+     * Replicas Total
+     *
+     * The scenario's replicas for this workload in this pool. Every replica of a workload has the same shape, so a flagged workload is never one of the oversized ones and this counts placed pods.
+     */
+    replicas_total: number;
+    /**
+     * Usage Basis
+     *
+     * Which observed statistic supplied usage_cpu_m. Anything below 'peak' means the flag is a lower bound; basis_notes says so once for the pool.
+     */
+    usage_basis: 'peak' | 'p95' | 'avg';
+    /**
+     * Usage Cpu M
+     *
+     * The exposure-basis usage that tripped the flag, in millicores.
+     */
+    usage_cpu_m: number;
+    /**
+     * Workload
+     */
+    workload: string;
+    /**
+     * Worst Case Share M
+     *
+     * Proportional share of one node's allocatable CPU at this unit's share of the node's requests, capped at its CPU limit and at what the node has, minimized over the contended nodes hosting it. A bound on the entitlement, never a prediction of what the container will get.
+     */
+    worst_case_share_m: number;
+};
+
+/**
+ * CpuContentionSchema
+ *
+ * Entitlement-based CPU contention for one pool in one scenario.
+ *
+ * Memory is deliberately absent: memory does not compress, so a node that
+ * cannot satisfy every pod at once kills rather than shares.
+ */
+export type CpuContentionSchema = {
+    /**
+     * Basis Notes
+     *
+     * Zero to two one-liners naming what weakened the flags: usage that fell back below 'peak', and pods with no usage data whose request was assumed instead.
+     */
+    basis_notes: Array<string>;
+    /**
+     * Contended Node Count
+     *
+     * Nodes whose placed pods' summed exposure-basis CPU usage exceeds allocatable CPU.
+     */
+    contended_node_count: number;
+    /**
+     * Flags
+     *
+     * Empty means all clear on this packing.
+     */
+    flags: Array<ContentionFlagSchema>;
+    /**
+     * Nodes Evaluated
+     *
+     * Nodes the packer opened for this pool. Fewer than the pool's node count when min_nodes exceeds demand.
+     */
+    nodes_evaluated: number;
+};
+
+/**
  * HTTPValidationError
  */
 export type HttpValidationError = {
@@ -293,6 +392,10 @@ export type PoolScenarioResultSchema = {
      * Capacity Memory Mib
      */
     capacity_memory_mib: number;
+    /**
+     * Runtime CPU risk read off this pool's packing. Null when the packer opened no nodes — a pool with nothing placeable has no node that could be contended. Requests alone drive placement; this block is additive context, never a verdict.
+     */
+    cpu_contention: CpuContentionSchema | null;
     /**
      * Cpu Requested M
      */

@@ -29,6 +29,12 @@ node strands the remaining core on every node it lands on.
 - Whether the HPA is saturated, or the rollout is what's really sizing the cluster.
 - Five scenarios per evaluation: `hpa_min`, `current`, `hpa_desired`,
   `hpa_max`, and `hpa_max_rollout`.
+- CPU contention per pool, on `/v1/evaluate` (no UI readout yet): which
+  workloads — and, when the import carried a breakdown, which containers
+  inside them — are observed above the CPU request that is their only
+  guarantee, on nodes whose pods together want more CPU than the node can
+  schedule. Each flag carries a worst-case share of the node, labeled a bound
+  rather than a prediction.
 - Baseline-vs-candidate comparison: edit a request, an HPA ceiling, or a
   machine size, and `/v1/compare` returns both results, the config diff, and
   the impact diff.
@@ -108,14 +114,25 @@ POST /v1/compare     {baseline, candidate} -> both results, config diff, impact 
 - Observed per-pod usage is held constant across all five scenarios, so the
   HPA scenarios show the shape of the response, not a converged steady state.
 - Container limits are imported and validated but don't affect placement, HPA
-  math, or node counts.
-- Only the `avg` of observed usage is read, by the HPA math. `p95`, `peak`, the
-  capture window, and the usage source are accepted and validated but affect no
-  result yet. The same is true of the optional per-container breakdown an
-  import builds — requests, limits, and usage per container are carried and
-  validated, but placement, HPA math, and node counts never read them. (They
-  do appear in `/v1/compare`'s configuration diff, which reports every changed
+  math, or node counts. A CPU limit does cap the worst-case share a contention
+  flag reports; memory limits are read by nothing.
+- Which statistic gets read is a convention. HPA math reads `avg` and nothing
+  else; CPU contention reads the highest one available — `peak`, else `p95`,
+  else `avg` — and says which it fell back to, so a `p95` does move contention
+  on a workload that has no `peak`. Nothing reads `p95` in preference to
+  `peak`, and the capture window and usage source are recorded but read by no
+  computation. The per-container breakdown is read only by contention
+  analysis, which compares each listed container against its own request:
+  placement, HPA math, and node counts never read it, but it decides which
+  flags appear and supplies their numbers. (Usage and the breakdown both
+  appear in `/v1/compare`'s configuration diff, which reports every changed
   input.)
+- CPU contention is an entitlement reading, not a kernel or scheduler
+  simulation: no `cpu.shares` weighting, no assumption about which pods are
+  busy at the same moment. The worst-case share on each flag bounds the
+  guarantee; it does not predict what a container will get. Memory has no
+  contention reading at all — memory does not compress, so the memory question
+  is exhaustion rather than sharing.
 - First-fit-decreasing is a heuristic; the real scheduler will sometimes do
   better and sometimes worse.
 

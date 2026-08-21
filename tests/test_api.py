@@ -121,6 +121,17 @@ def test_evaluate(client: TestClient, cluster_payload: dict[str, Any]) -> None:
     default_pool = body["scenarios"]["current"]["pools"]["default"]
     assert default_pool["nodes_to_remove"] == 1
     assert default_pool["scale_down_blocked_reason"] is None
+    # All clear, and saying so: a checked node with an empty flag list, plus the
+    # note that this fixture's usage is an average and the reading a lower bound.
+    assert default_pool["cpu_contention"] == {
+        "nodes_evaluated": 1,
+        "contended_node_count": 0,
+        "flags": [],
+        "basis_notes": [
+            "Peak unavailable for 1 workload — avg used; "
+            "contention here is a lower bound."
+        ],
+    }
 
 
 def test_evaluate_withholds_a_scale_down_for_oversized_pods(
@@ -162,6 +173,91 @@ def test_evaluate_withholds_a_scale_down_with_no_placeable_demand(
     assert pool["nodes_to_remove"] == 0
     assert pool["scale_down_blocked_reason"] == "no_placeable_demand"
     assert pool["current_nodes"] - pool["effective_nodes_required"] == 2
+    # No node was packed, so there is nothing that could be contended. Null is
+    # distinct from an all-clear block, which reports a node that was checked.
+    assert pool["cpu_contention"] is None
+
+
+def test_evaluate_flags_a_pod_living_on_borrowed_cpu(
+    client: TestClient,
+    cluster_payload: dict[str, Any],
+) -> None:
+    # Four api pods share the fixture's one 3800m node. Each peaks at 1200m, so
+    # the node is asked for 4800m it does not have, and every replica is above
+    # the 500m it reserved.
+    payload = deepcopy(cluster_payload)
+    payload["workloads"]["api"]["observed_cpu_per_pod"] = {"avg": 400, "peak": 1200}
+
+    response = client.post("/v1/evaluate", json=payload)
+
+    assert response.status_code == 200
+    contention = response.json()["scenarios"]["current"]["pools"]["default"][
+        "cpu_contention"
+    ]
+    assert contention == {
+        "nodes_evaluated": 1,
+        "contended_node_count": 1,
+        "flags": [
+            {
+                "workload": "api",
+                "container": None,
+                "cpu_request_m": 500,
+                "usage_cpu_m": 1200,
+                "usage_basis": "peak",
+                "replicas_affected": 4,
+                "replicas_total": 4,
+                # 500 of the node's 2000m of requests, over 3800m allocatable.
+                # The 1000m CPU limit sits above that, so it does not bite.
+                "worst_case_share_m": 950,
+                "message": (
+                    "api peaks at 1200m against a 500m request; "
+                    "4 of 4 replicas share a contended node. "
+                    "Worst-case bound if every neighbor peaks at once: 950m."
+                ),
+            }
+        ],
+        # Every reading came from a measured peak, so nothing weakened it.
+        "basis_notes": [],
+    }
+
+
+def test_evaluate_names_the_borrowing_container(
+    client: TestClient,
+    cluster_payload: dict[str, Any],
+) -> None:
+    # The same contended node, with the breakdown an import carries. The node
+    # sum is unchanged -- it is summed from pod figures -- but the flags now say
+    # which container inside the pod is the one borrowing.
+    payload = deepcopy(cluster_payload)
+    payload["workloads"]["api"]["observed_cpu_per_pod"] = {"avg": 400, "peak": 1200}
+    payload["workloads"]["api"]["containers"] = [
+        {
+            "name": "app",
+            "cpu_request_m": 481,
+            "observed_cpu": {"avg": 300, "peak": 900},
+        },
+        {
+            "name": "istio-proxy",
+            "cpu_request_m": 19,
+            "observed_cpu": {"avg": 100, "peak": 300},
+        },
+    ]
+
+    response = client.post("/v1/evaluate", json=payload)
+
+    assert response.status_code == 200
+    contention = response.json()["scenarios"]["current"]["pools"]["default"][
+        "cpu_contention"
+    ]
+    assert contention["contended_node_count"] == 1
+    assert [
+        (flag["container"], flag["worst_case_share_m"]) for flag in contention["flags"]
+    ] == [("app", 913), ("istio-proxy", 36)]
+    assert contention["flags"][1]["message"] == (
+        "istio-proxy in api peaks at 300m against a 19m request; "
+        "4 of 4 replicas share a contended node. "
+        "Worst-case bound if every neighbor peaks at once: 36m."
+    )
 
 
 def test_evaluate_reports_which_end_of_the_hpa_range_clamped(
