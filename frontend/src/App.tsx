@@ -87,9 +87,15 @@ function describeConstraint(scenario?: PoolScenarioResult): { label: string; not
 // `caAction.ts` describes — so each says which pods it is about, and only while
 // there are two populations to tell apart.
 function Metric({ label, value, note }: { label: string; value: ReactNode; note?: string }) {
+  // A labelled group, for the same reason the CA-action tile below is one: the
+  // label, the number, and the note that says which pods that number is about
+  // are three loose strings, and a screen reader moving through the grid
+  // announces them with no boundary saying where one tile ends. `aria-labelledby`
+  // reuses the visible label so the name cannot drift from what is on screen.
+  const labelId = useId()
   return (
-    <div className="metric">
-      <span>{label}</span>
+    <div className="metric" role="group" aria-labelledby={labelId}>
+      <span id={labelId}>{label}</span>
       <strong>{value}</strong>
       {note && <small>{note}</small>}
     </div>
@@ -114,9 +120,14 @@ function CapacityBar({
   const usage = percent(value, capacity)
   const strandedShare = percent(stranded, capacity)
   const trackState = blocked ? ' is-blocked' : usage > 90 ? ' is-hot' : ''
+  // Grouped and named for the same reason as `Metric` above: the resource name,
+  // the figure over capacity, and the requested/stranded split are one reading,
+  // and without a boundary a screen reader runs the CPU bar's percentages
+  // straight into the memory bar's heading.
+  const labelId = useId()
   return (
-    <div className="capacity-bar">
-      <div className="bar-head"><span>{label}</span><b className="num">{display(value)} / {display(capacity)}</b></div>
+    <div className="capacity-bar" role="group" aria-labelledby={labelId}>
+      <div className="bar-head"><span id={labelId}>{label}</span><b className="num">{display(value)} / {display(capacity)}</b></div>
       <div className={`bar-track${trackState}`}>
         <em style={{ width: `${Math.min(100, usage)}%` }} />
         <u style={{ width: `${Math.min(100 - Math.min(100, usage), strandedShare)}%` }} />

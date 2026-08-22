@@ -158,10 +158,25 @@ export function RuntimeRisk({
           The sums are kept as they shipped, so the tiles say whose they are rather
           than quietly re-scoping a shipped number under a per-pool heading. */}
       <div className="limit-summary">
-        <div><span>CPU runtime limit</span><strong className={limits.cpuUnbounded ? 'is-unbounded' : 'num'}>{limits.cpuUnbounded ? 'Unbounded' : formatCpu(limits.cpu)}</strong><small>all pools</small></div>
-        <div><span>Memory runtime limit</span><strong className={limits.memoryUnbounded ? 'is-unbounded' : 'num'}>{limits.memoryUnbounded ? 'Unbounded' : formatMemory(limits.memory)}</strong><small>all pools</small></div>
+        <LimitTile label="CPU runtime limit" unbounded={limits.cpuUnbounded} value={formatCpu(limits.cpu)} />
+        <LimitTile label="Memory runtime limit" unbounded={limits.memoryUnbounded} value={formatMemory(limits.memory)} />
       </div>
       <p className="risk-note">Requests alone drive placement; limits and usage drive the runtime risk read above.</p>
     </section>
+  )
+}
+
+// A labelled group, like the results panel's metric tiles: the heading, the
+// total, and the "all pools" scope are one reading, and without a boundary a
+// screen reader runs the CPU total straight into the memory heading.
+// `aria-labelledby` reuses the visible heading, so the name cannot drift.
+function LimitTile({ label, unbounded, value }: { label: string; unbounded: boolean; value: string }) {
+  const labelId = useId()
+  return (
+    <div role="group" aria-labelledby={labelId}>
+      <span id={labelId}>{label}</span>
+      <strong className={unbounded ? 'is-unbounded' : 'num'}>{unbounded ? 'Unbounded' : value}</strong>
+      <small>all pools</small>
+    </div>
   )
 }

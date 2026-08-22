@@ -12,13 +12,36 @@ import type { Kcap } from './support/kcap'
  * both.
  */
 test.describe('Runtime risk', () => {
-  /** Everything the section may not move, read as one line each. */
+  /**
+   * Everything the section may not move, read as one line each: the five
+   * scenario tabs, the instruction beside the verdict, and the two node numbers
+   * under it. Runtime risk is additive context — usage and declared limits
+   * describe how the packing behaves, and requests alone decide it.
+   */
   async function projection(kcap: Kcap) {
     return {
+      hpaMin: await kcap.podCount('HPA min'),
+      current: await kcap.podCount('Current'),
       desired: await kcap.podCount('Desired'),
       hpaMax: await kcap.podCount('HPA max'),
+      rollout: await kcap.podCount('Rollout'),
       caAction: await kcap.caAction(),
+      placement: await kcap.tileReading('Placement'),
+      headroom: await kcap.tileReading('Headroom'),
     }
+  }
+
+  /**
+   * The memory ceiling ratio the exposure chip prints, as a number. R21 is
+   * about which side of 100% it falls on — above means a node's ceilings
+   * outrun the memory it has, exactly 100% means a pod can claim its whole
+   * node and no more — so the number is read rather than quoted.
+   */
+  async function memoryCeilingPercent(kcap: Kcap): Promise<number> {
+    const section = (await kcap.runtimeRisk.innerText()).replace(/\s+/g, ' ')
+    const match = /memory ceilings reach ([\d.]+)% of allocatable on the most exposed node/.exec(section)
+    expect(match, 'the exposure chip printed no memory ceiling ratio').not.toBeNull()
+    return Number(match?.[1])
   }
 
   test('R20a — an examined packing with nothing to report says so', async ({ kcap }) => {
@@ -106,5 +129,71 @@ test.describe('Runtime risk', () => {
     // the containers the import listed, so a pod may be borrowing more than its
     // rows account for. It appears exactly when a row names a container.
     await expect(kcap.runtimeRisk).toContainText('Container rows name only the containers the import listed')
+  })
+
+  test('R21a — a declared memory ceiling flags an exhaustible node and moves no node number', async ({ kcap }) => {
+    await kcap.open()
+    await kcap.selectWorkload('api')
+
+    // The control the edit is read against: exhaustion is something kcap
+    // examined and cleared here, which is why the neutral line says
+    // "contention or exhaustion" rather than contention alone.
+    await expect(kcap.runtimeRisk).toContainText('No contention or exhaustion detected on this packing.')
+    await expect(kcap.riskChip('Node exhaustible')).toHaveCount(0)
+
+    const before = await projection(kcap)
+    const memoryLimitTotalBefore = await kcap.tileReading('Memory runtime limit')
+
+    await kcap.setField('Memory limit value', 4096)
+
+    // Nodes are named because nodes are what fired: their declared ceilings
+    // outrun the memory those nodes actually have.
+    await expect(kcap.riskChip('Node exhaustible')).toHaveText(/^Node exhaustible · \d+ of \d+ nodes?$/)
+    expect(await memoryCeilingPercent(kcap), 'an exhaustible node is one whose ceilings exceed it').toBeGreaterThan(100)
+
+    // Not one node number moves: a ceiling is not a request, and requests are
+    // what the packing is decided on.
+    expect(await projection(kcap)).toEqual(before)
+    // The one figure a limit is allowed to move is the sum of the limits.
+    expect(await kcap.tileReading('Memory runtime limit')).not.toBe(memoryLimitTotalBefore)
+
+    await kcap.expandRisk('Node exhaustible')
+    // Prose, composed by the engine so that every consumer of the API reports
+    // exhaustion in the same words. The clause quoted is the finding itself.
+    await expect(kcap.runtimeRisk).toContainText('can be exhausted by pods behaving within their limits')
+    // The CPU ratio rides along inside the expansion and never earns a chip of
+    // its own, because an overcommitted node throttles rather than dies.
+    await expect(kcap.runtimeRisk).toContainText(
+      'CPU is compressible, so such a node throttles rather than runs out.',
+    )
+  })
+
+  test('R21b — an unlimited pod is flagged where no node is over its allocatable', async ({ kcap }) => {
+    await kcap.open()
+
+    // At 3000m one pod holds a node by itself, so a pod with no memory limit
+    // claims exactly its node and no more. The exhaustible *node* count is 0
+    // while the finding is entirely real — read the count and the chip would
+    // say `0 of 6 nodes`, which is why the finding is read off the flags and
+    // the chip names the pods instead.
+    await kcap.selectWorkload('api')
+    await kcap.setToggle('Memory limit', false)
+    await kcap.setField('CPU request', 3000)
+    await kcap.selectWorkload('worker')
+    await kcap.setField('Current replicas', 0)
+    // `Desired` holds pods above zero through the HPA minimum; `Current` is
+    // where `worker` is actually absent.
+    await kcap.selectScenario('Current')
+
+    await expect(kcap.riskChip('Unlimited memory')).toHaveText(/^Unlimited memory · \d+ pods?$/)
+    await expect(kcap.riskChip('Node exhaustible')).toHaveCount(0)
+    expect(await memoryCeilingPercent(kcap), 'no node here is over its allocatable').toBe(100)
+
+    await kcap.expandRisk('Unlimited memory')
+    await expect(kcap.runtimeRisk).toContainText('carry no memory limit; each can claim its whole node')
+
+    // With a ceiling missing there is no total to print, and the tile says so
+    // rather than summing the ones that remain.
+    expect(await kcap.tileReading('Memory runtime limit')).toBe('Unbounded all pools')
   })
 })

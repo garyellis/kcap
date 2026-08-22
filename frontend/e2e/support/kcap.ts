@@ -68,6 +68,18 @@ export class Kcap {
     await expect(this.connectionPill).toBeVisible()
   }
 
+  /**
+   * Press Reset at the top of the Configuration panel — the checklist's own
+   * "between scenarios" gesture. A test that presses it mid-scenario is making
+   * the claim the row makes: the readout it is about goes back to what an
+   * untouched configuration shows.
+   */
+  async reset(): Promise<void> {
+    const mark = this.traffic.mark()
+    await this.page.getByRole('button', { name: 'Reset', exact: true }).click()
+    await this.settled(mark)
+  }
+
   // --- the configuration catalog -------------------------------------------
 
   /** The catalog button for a workload, named `api 6 pods · 750m · 1 GiB` on screen. */
@@ -154,6 +166,75 @@ export class Kcap {
     await this.settled(mark)
   }
 
+  /**
+   * Type a value and commit it, without assuming the model keeps what was
+   * typed.
+   *
+   * `setField` waits for the edit to reach the engine, which a value the model
+   * overrules back onto the one already stored never does — nothing changed, so
+   * nothing is sent. R24 is exactly that: typing `400` into a peak that floors
+   * at the average, twice in a row, where the second attempt is the one that
+   * matters.
+   */
+  async proposeField(label: string, value: number): Promise<void> {
+    await this.field(label).fill(String(value))
+    await this.field(label).press('Enter')
+    await this.quiet()
+  }
+
+  /**
+   * The slider beside a numeric field. `NumberField` names it `<label> slider`,
+   * which is the app's own accessible name and not a hook added for this suite.
+   */
+  slider(label: string): Locator {
+    return this.page.getByRole('slider', { name: `${label} slider` })
+  }
+
+  /**
+   * Drag a field's slider to a fraction of its track and release it, pressing
+   * at wherever the thumb currently sits.
+   *
+   * The gesture matters, not just the resulting value: the slider commits
+   * through `onChange` and never blurs, which is the path C5's stale readout
+   * survived on while the typed path looked fine. A test that types cannot see
+   * it — that is why R24's row asks for a drag by name.
+   */
+  async dragSlider(label: string, toFraction: number): Promise<void> {
+    const slider = this.slider(label)
+    const track = await slider.boundingBox()
+    expect(track, `the ${label} field has no slider to drag`).not.toBeNull()
+    if (track === null) return
+
+    const min = Number(await slider.getAttribute('min'))
+    const max = Number(await slider.getAttribute('max'))
+    const from = (Number(await slider.inputValue()) - min) / (max - min)
+    const y = track.y + track.height / 2
+    const alongTrack = (fraction: number) => track.x + track.width * fraction
+
+    await this.page.mouse.move(alongTrack(from), y)
+    await this.page.mouse.down()
+    // Stepped, so the field sees the positions a hand passes through rather than
+    // only the one it lands on.
+    await this.page.mouse.move(alongTrack(toFraction), y, { steps: 8 })
+    await this.page.mouse.up()
+    // Not `settled`: a drag that ends inside a coerced range stores the value
+    // already held, which changes no configuration and sends no request.
+    await this.quiet()
+  }
+
+  /**
+   * Flip a labelled switch — `CPU limit`, `Memory limit`, `HPA`. Asserts it was
+   * in the other position first, so a scenario that silently toggled nothing
+   * fails here rather than three assertions later.
+   */
+  async setToggle(label: string, on: boolean): Promise<void> {
+    const toggle = this.page.getByRole('switch', { name: startingWith(label) })
+    await expect(toggle, `${label} is already ${on ? 'on' : 'off'}`).toHaveAttribute('aria-checked', String(!on))
+    const mark = this.traffic.mark()
+    await toggle.click()
+    await this.settled(mark)
+  }
+
   /** The `Rollout max surge` value and its `%` / `pods` unit picker. */
   get surge(): Locator {
     return this.field('Rollout max surge')
@@ -179,6 +260,16 @@ export class Kcap {
       .getByRole('button', { name: startingWith(label) })
   }
 
+  /**
+   * Switch to a scenario tab. Every scenario arrives in one result, so this is
+   * a client-side switch with no round trip of its own — the assertions that
+   * follow are what prove the tab took.
+   */
+  async selectScenario(label: string): Promise<void> {
+    await this.scenarioTab(label).click()
+    await this.quiet()
+  }
+
   /** The pod count printed inside a scenario tab, as the operator reads it. */
   async podCount(label: string): Promise<number> {
     const reading = await this.scenarioTab(label).getByText(/^\d+ pods?$/).innerText()
@@ -191,8 +282,74 @@ export class Kcap {
    * (The minus is U+2212, not a hyphen — that is what the tile prints.)
    */
   async caAction(): Promise<string> {
-    const tile = await this.page.getByRole('group', { name: 'CA action' }).innerText()
-    return tile.replace(/\s+/g, ' ').replace(/^CA action /, '').trim()
+    return this.tileReading('CA action')
+  }
+
+  /**
+   * A labelled tile of the results panel, read as the one line it is:
+   * `1 nodes for the pods that fit`, `None no pods in scenario`, `−3 nodes`,
+   * `Unbounded all pools`.
+   *
+   * Covers the four metric tiles (`Placement`, `Effective target`, `Headroom`,
+   * `Constraint`), the CA-action tile, and the two runtime-limit totals. Every
+   * one of them printed its label, its number, and the small line under it as
+   * loose siblings, so a screen reader ran one tile straight into the next and
+   * neither this suite nor a person navigating by group could address one. They
+   * are now `role="group"` named from the label already on screen — an ARIA fix
+   * rather than a test id, on the CA-action tile's precedent, and walked in the
+   * browser as the UI change it is.
+   *
+   * The number and the note under it are read together on purpose: the note
+   * says which pods that number is about, so a test that took the number alone
+   * would stay green while the panel attributed it to the wrong population.
+   *
+   * `innerText`, so a chip uppercased in CSS reads as the operator sees it.
+   */
+  async tileReading(label: string): Promise<string> {
+    const tile = await this.page.getByRole('group', { name: label, exact: true }).innerText()
+    return tile.replace(/\s+/g, ' ').replace(new RegExp(`^${label} `), '').trim()
+  }
+
+  /**
+   * One bar of the Request saturation section, `CPU` or `Memory`, read as one
+   * line: `2 cores / 10.8 cores 19% requested · 81% (8.8 cores) stranded at
+   * this pod shape`. A bar is a tile of the same kind and took the same
+   * grouping fix; it is named separately because R25 needs both halves at once
+   * — the ratio and the stranded figure beside it divide by the same capacity
+   * and are only right or wrong as a pair.
+   */
+  async requestBarReading(label: string): Promise<string> {
+    return this.tileReading(label)
+  }
+
+  /**
+   * The Request saturation subhead: `3 × node allocatable` on an ordinary pool,
+   * `the pods that fit · 3 × node allocatable` where the pool holds pods no
+   * node can take. Anchored at the end, so it is the subhead itself that
+   * matches and not the section around it.
+   */
+  get saturationSubhead(): Locator {
+    return this.page.getByText(/× node allocatable$/)
+  }
+
+  /**
+   * The paragraph under the saturation bars. Absent entirely when no pod fits a
+   * node at all — there is no per-node figure to print — which is a reading in
+   * its own right, so callers assert its count.
+   */
+  get densityNote(): Locator {
+    return this.page.getByText(/^Provisioned capacity, not the live pool\./)
+  }
+
+  /**
+   * The verdict paragraph a pool blocked by pods no node can hold prints:
+   * `6 pods request more than one whole node. No node count places them.`
+   * Absent on any other pool, so its count is itself a reading.
+   */
+  get oversizedVerdict(): Locator {
+    // Anchored at the count: the density paragraph names the same population in
+    // the same words further down the panel, and an unanchored match finds both.
+    return this.page.getByText(/^\d+ pods? requests? more than one whole node\./)
   }
 
   // --- runtime risk ---------------------------------------------------------
