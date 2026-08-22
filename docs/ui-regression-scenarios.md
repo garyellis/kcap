@@ -24,9 +24,9 @@ made — it is not a discovery tool, and it does not retire the manual walk.
 
 Every row carries exactly one status. Nineteen are **Automated**, naming their spec file and
 keeping a separate **Last walked manually** date that CI never touches. Six are **manual
-only**, each saying why automating it would be worse than not. One is **not yet
-promoted** — R26 carries an expectation written the session that shipped the behavior, and
-waits a session for it to settle.
+only**, each saying why automating it would be worse than not. Three are **not yet
+promoted** — R26, R27, and R28 each carry an expectation written the session that shipped the
+behavior, and wait a session for it to settle.
 
 An automated row may still name a part of itself the suite deliberately leaves alone; R24 is
 the standing example. That is a note inside the row, not a fourth status.
@@ -196,6 +196,60 @@ sub-average drags all reading `620`, `1990` held above the average and `620` aga
 back, `400` typed twice reading `620` both times; (d) walked on the memory peak and raised C7.
 Previously walked 2026-08-21, Session L, on the fixed build; the same walk on the pre-fix build
 reproduced C5 — box `470` beside a thumb at `620`)
+
+---
+
+## Manual runs
+
+### R27 — A held run says its numbers are old, and stops counting while they are
+**Pins:** with **Auto** off the panel goes on showing the last run while the operator edits, and
+until now nothing on screen said so. Three separate reasons: the dim that was meant to say it was
+written in the first commit and never rendered — the results body carries an entry animation
+whose last frame is `opacity: 1`, and a *retained* animation value outranks every ordinary style
+rule, so the finished animation went on deciding that opacity forever and only the scenario tabs
+dimmed; the cluster-total strip was outside the rule that did the dimming; and the change chip
+counts the engine's own configuration diff, which describes the configuration the engine was last
+*given*, so with one edit waiting it read `0 changes` and with two it read `1 change`. The error
+runs one way: a held panel always shows the smaller, pre-edit footprint, which for a capacity
+advisor reads as under-provisioning and an over-eager scale-down.
+**Steps:** Reset. Turn **Auto** off — nothing else. Then select `api` and set **Current
+replicas** to `12`, committing the field. Then press ＋ beside **Node pools** to add a second
+pool. Then press **Run simulation**.
+**Expect:**
+- turning **Auto** off on its own changes nothing on the panel: the numbers still describe the
+  screen, so they are still shown as if they do. The `Run simulation` button appears, greyed out,
+  because there is nothing to run.
+- after the replica edit the whole panel goes pale below the Auto row — the scenario tabs, the
+  verdict, the four tiles, the request bars, the node map, the workload table, the Runtime risk
+  section, and the delta strip. The heading, the chip, and the **Run simulation** button stay at
+  full contrast: they are the parts that explain the fading and undo it.
+- the chip turns amber and reads `edited since last run`. It states no count — the count it used
+  to print was about the previous run, and a panel that has just stopped describing the screen is
+  the last place to assert a number about it.
+- after adding the pool the `All pools · N nodes` strip and the pool tabs appear, and they are
+  pale with everything else. This is the half that never faded: it is the cluster-wide headline
+  figure, and it is the one an operator reads first.
+- what the pale numbers say is the *old* configuration: `Placement 3 nodes`, `CA action −3
+  nodes`, `All pools 3 nodes`.
+- **Run simulation** brings the whole panel back to full contrast in one step, the chip returns
+  to a plain count (`4 changes`), and every figure grows: `Placement 4 nodes`, `CA action −2
+  nodes`, `All pools 4 nodes`. Reading the two states in that order is the point — the held panel
+  under-counted nodes and over-stated the scale-down.
+- no console errors, and no 422.
+**Origin:** the held-run readout repair (Session P) · **Not yet promoted** — written and walked
+this session; it waits one session for review. Two things to know when it is promoted. Manual
+mode is pinned nowhere else: no other scenario and no promoted test touches **Auto**, the
+**Run simulation** button, or a held run, so until then this row is the only thing holding any of
+it. And only part of the row is assertable — the chip's wording and the numbers are text, but the
+fading is opacity, and the selector policy in `frontend/e2e/support/kcap.ts` forbids asserting on
+CSS, so a test can pin *that a held run shows the previous numbers* and never that it shows them
+faintly. `kcap.changeChip` also matches `/^\d+ changes?$/`, which a stale chip no longer matches
+at all: the locator has to learn the countless form, or the test fails as "element not found"
+rather than as a wrong reading. ·
+**Last verified:** 2026-08-22 (Session P, walked on a build of this working tree at one pool and
+at two, and walked again on a build of the commit before the change to see it fail — there the
+results body measured at full strength beside a faded tab strip, the cluster-total strip likewise,
+and the chip read `0 changes` with one edit waiting and `1 change` with two)
 
 ---
 
@@ -514,9 +568,10 @@ results panel, on the `Desired` tab the app opens on — every number below is t
 Expand the chip. (c) Reset, then set **CPU request** to `8000` on both `api` and `worker`.
 (d) Reset and import fixture **F5** with `Replace configuration`, then expand the chip.
 **Expect:**
-- (a) one neutral line, `No contention or exhaustion detected on this packing.`, and one muted
-  line beneath it — the engine's basis note, `Peak unavailable for 2 workloads — avg used;
-  contention here is a lower bound.` No chip, no colour. Below them the section still carries the
+- (a) one neutral line, `No contention or exhaustion detected on this packing.`, and two muted
+  lines beneath it — the engine's basis note, `Peak unavailable for 2 workloads — avg used;
+  contention here is a lower bound.`, and the CPU reading R28 is about. No chip, no colour.
+  Below them the section still carries the
   two limit tiles (`CPU runtime limit`, `Memory runtime limit`), which P2.3 moved into it, and now
   ends with the swapped caption `Requests alone drive placement; limits and usage drive the
   runtime risk read above.`
@@ -529,7 +584,8 @@ Expand the chip. (c) Reset, then set **CPU request** to `8000` on both `api` and
   sentence, which the panel never rewrites; it is a hover only, and deliberately carries no number
   the columns do not already show.
 - (c) `No nodes were packed for this pool, so runtime risk was not evaluated.` — and no basis
-  note, because a pool that packed nothing has nothing to disclose a basis for.
+  note, because a pool that packed nothing has nothing to disclose a basis for. No CPU reading
+  either: there is no node to have declared anything against.
 - (d) the chip still reads `1 WORKLOAD` while the table has **two** rows — flags are per
   (workload, container), and the chip counts workloads. `app` reads `500m` / `1700m peak` /
   `514m`; `istio-proxy` reads `19m` / `300m peak` / `19m`. A further muted line appears above the
@@ -542,8 +598,10 @@ P3.3 (Session I) ·
 count, and the caveat line. The container cell's own wording is deliberately not asserted:
 `whole pod` was written this session and a test would freeze it a session early, so the test
 reads the row by its workload and numbers instead ·
-**Last walked manually:** 2026-08-21 (Session I, all four steps — the all-clear sentence and
-the container cell both changed here)
+**Last walked manually:** 2026-08-22 (Session P, (a) and (c) re-walked — those are the two
+states the CPU reading changed, and (c) is where it must stay silent. Previously walked
+2026-08-21, Session I, all four steps, where the all-clear sentence and the container cell
+both changed)
 
 ---
 
@@ -569,17 +627,18 @@ and expand the chip. (c) Reset. Select `api`, turn its **Memory limit** toggle o
   number that moves is the `Memory runtime limit` tile, `22 GiB` → `38 GiB`, which is the sum of
   the limits themselves. Expanded: prose, not a table — the engine's sentence `Memory ceilings
   on the most exposed node reach 120.7% of allocatable — 2 of 3 nodes can be exhausted by pods
-  behaving within their limits.`, then a muted `CPU limits reach 263.9% of allocatable on the
-  most overcommitted node. CPU is compressible, so such a node throttles rather than runs out.`
-  The CPU ratio never gets a chip of its own — and note it is only ever printed beside a memory
-  finding, so a pool that is CPU-overcommitted and memory-clear reads as an all-clear.
+  behaving within their limits.` Beneath the expansion, not inside it, a muted `CPU limits reach
+  263.9% of allocatable on the node that declares the most. CPU is compressible, so a node over
+  100% throttles rather than runs out.` The CPU ratio never gets a chip of its own, and it is not
+  a consequence of the memory finding either — it reads the same here as it does on the all-clear
+  in (a), which is what R28 is about.
 - (c) the chip reads `UNLIMITED MEMORY · 6 PODS` with `memory ceilings reach 100% of allocatable
   on the most exposed node`. This is the state a node-count chip would misreport: at 3000m per
   pod one pod holds a node alone, so no node is *over* its allocatable and `0 of 6 nodes` would
   be the reading. Expanded: `6 pods carry no memory limit; each can claim its whole node, so any
-  node they share can be exhausted.`, then the CPU line at `83.3%` — the request edit raised the
-  CPU limit with it, so the ratio is still reported. The `Memory runtime limit` tile reads
-  `Unbounded`.
+  node they share can be exhausted.`, and beneath the expansion the CPU line at `83.3%` — the
+  request edit raised the CPU limit with it, so the ratio is still reported. The `Memory runtime
+  limit` tile reads `Unbounded`.
 **Origin:** P3.3 (Session I) ·
 **Automated:** `frontend/e2e/runtime-risk.spec.ts` — two tests, one per chip label, because they
 are two different decisions and a failure should say which. (b) reads the all-clear first, so
@@ -590,11 +649,45 @@ the state a node-count chip misreports as `0 of 6 nodes`. The chips' warn tone i
 the selector policy keeps CSS out, so the test pins their words. Reading the `Memory runtime
 limit` tile needed it and its CPU sibling to become `role="group"`, the same ARIA fix the metric
 tiles took ·
-**Last walked manually:** 2026-08-22 (Session O, (a)–(c) re-walked after the limit tiles gained
-their group role — `NODE EXHAUSTIBLE · 2 OF 3 NODES` at 120.7% with the five tabs at
+**Last walked manually:** 2026-08-22 (Session P, (a)–(c) re-walked after the CPU line moved out
+of the expansion — `NODE EXHAUSTIBLE · 2 OF 3 NODES` at 120.7% with the five tabs at
 `5 / 10 / 12 / 30 / 38`, `−3`, `Placement 3`, `Headroom 17` all unmoved and the memory tile at
 `22 GiB` → `38 GiB`; `UNLIMITED MEMORY · 6 PODS` at 100% with the tile reading `Unbounded` and
-the CPU line at 83.3%. Previously walked 2026-08-21, Session I)
+the CPU line at 83.3%, now readable without expanding either chip. Previously walked
+2026-08-22, Session O, and 2026-08-21, Session I)
+
+---
+
+### R28 — A CPU-overcommitted pool says so even when its memory is clean
+**Pins:** the CPU reading used to live inside the memory expansion, so it appeared only when the
+memory chip fired. A pool with unremarkable memory and CPU limits at nearly three times
+allocatable therefore showed nothing at all — and a section that shows nothing reads as a
+section with nothing to report. The reading is not a finding: CPU throttles under pressure
+where memory kills, so it may not arrive as a chip, a colour, or anything an operator would
+page on. It just has to be *there*.
+**Steps:** (a) load the default configuration and read the **Runtime risk** section on the
+`Desired` tab the app opens on, without expanding anything. (b) Select `api` and turn its
+**CPU limit** toggle off; select `worker` and turn its **CPU limit** toggle off. (c) Reset,
+then set **CPU request** to `8000` on both `api` and `worker`.
+**Expect:**
+- (a) under the all-clear line and the basis note, a third muted line in the same grey as the
+  other two: `CPU limits reach 263.9% of allocatable on the node that declares the most. CPU is
+  compressible, so a node over 100% throttles rather than runs out.` No chip, no warn tone,
+  nothing to expand — and the memory side still says the pool is clear, because it is. Every
+  projected number is the one R20 (a) reads: the five tabs at `5 / 10 / 12 / 30 / 38`,
+  `Capacity clear`, `CA action −3`, `Placement 3`, `Headroom 17`, the strip at `+0`.
+- (b) the CPU line is gone and the section is back to the all-clear and the basis note. Nothing
+  declares a CPU limit, so there is no ratio, and an absent reading is left unsaid rather than
+  announced. The `CPU runtime limit` tile reads `Unbounded`, which is where that fact belongs.
+- (c) `No nodes were packed for this pool, so runtime risk was not evaluated.` and nothing else:
+  a pool that packed nothing was not examined, and a CPU ratio would be a reading about nodes
+  that do not exist.
+**Origin:** Session P ·
+**Not yet promoted:** the wording of the line was decided this session. It waits a session to
+settle before `frontend/e2e/runtime-risk.spec.ts` freezes it; R21's own CPU assertion already
+guards that the line exists ·
+**Last walked manually:** 2026-08-22 (Session P, all three steps, on a build of this working
+tree — (a) at 263.9% with no node number moved from the pre-change reading)
 
 ---
 
@@ -925,6 +1018,46 @@ one layer down. It is a shared-component question like C5 before it — every fi
 and a coercing caller has it — which is why it is logged rather than fixed here.
 **Status:** open, needs owner sign-off before anything moves. Logged rather than fixed: this
 session's task was promotion, and R24's automated half passes on the field that is unaffected.
+
+### C8 — A held results panel says its numbers are old only in colour
+**Observed:** 2026-08-22 (Session P, while shipping R27). With **Auto** off and an edit waiting,
+everything the panel says is now pale and the chip beside the heading reads `edited since last
+run`. Both signals are real, and between them they are the whole message: there is no sentence
+anywhere on the panel saying the reading is out of date. An operator who has scrolled down to the
+node map or the Runtime risk table has left the chip behind in the header, and is looking at a
+screenful of numbers whose only remaining marker is that they are a little lighter than usual.
+**Why it is not a wrong number:** every figure in a held panel is a true reading of the
+configuration the engine was last given, and R27 now stops the one element that asserted something
+false about the screen it sits on. What is absent is a statement of *which* configuration the
+numbers are about — the one thing the panel has never said in words.
+**What R27 already covers**, so this is not a re-litigation of it: the fading now reaches the
+whole panel body, including the `All pools` cluster-total strip that used to stay bright; the
+heading, the chip, and the **Run simulation** button deliberately stay at full contrast; and the
+chip states no count while a run is held. The decision left is only whether prose is needed *on
+top of* those, not whether they were the right first move.
+**The question:** whether the panel should carry a written "these results are out of date" line.
+It is the only option that survives a scroll and the only one that works without colour, which is
+why it is worth asking — but it is a new element, and where it sits changes what it does. Options
+worth weighing: put it in the run bar beside **Run simulation**, the one strip that stays bright
+and holds the control that fixes it, at the cost of crowding a bar that is already a toggle and a
+button; put it at the top of the results body, where it is with the numbers it is about but
+scrolls away with them exactly as the chip does; or leave it, on the grounds that a faded panel,
+an amber chip, and a live Run button are three signals already and a fourth is noise. The wording
+is the real content of the decision and it is not a CSS choice, which is why this is logged rather
+than fixed.
+**Adjacent, observed and also not fixed:** `ExportModal` is handed `config={candidate}` while the
+panel beside it renders `submitted`. Press **Export** from a held panel and the saved scenario is
+the *edited* configuration, while the numbers that were printed beside it when it was saved are
+the previous run's. Load that scenario back and it evaluates to different figures than the ones
+the operator was reading when they saved it. Nothing in the export is wrong on its own terms — it
+saves a configuration, and the candidate is the configuration — but it is this same desync one
+layer over, and it needs the same owner call: export what was run, export the candidate and label
+it, or refuse to export while a run is held. R14 pins the round-trip and passes, because it never
+holds a run.
+**Status:** open, needs owner sign-off before anything moves. Logged rather than fixed: this
+session's task was to make the designed fading render and to stop the chip asserting a count about
+a previous run. A new element with wording and placement, and a second desync at the export
+boundary, are each their own decision.
 
 ### ~~C2 — An imported per-container breakdown survives pod-level edits and goes stale~~
 **RESOLVED 2026-08-20** (owner chose to drop the breakdown on a pod-level edit). Promoted to

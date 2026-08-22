@@ -129,8 +129,9 @@ export function RuntimeRisk({
                   : `Unlimited memory · ${counted(exposure.unlimitedPodCount, 'pod')}`}</span>
                 {/* "Most exposed", not "fullest": this is the highest-ceiling node,
                     which is routinely not the one carrying the most requests. And the
-                    CPU line below reports its own maximum, so the two can legitimately
-                    be describing different nodes — hence neither says "the" node. */}
+                    CPU line beneath the section reports its own maximum, so the two can
+                    legitimately be describing different nodes — hence neither claims to
+                    be about the same one. */}
                 <small>memory ceilings reach {exposure.memoryMaxLimitPercent}% of allocatable on the most exposed node</small>
               </summary>
               {/* Prose, not a table: the engine composes whole sentences here rather
@@ -139,12 +140,6 @@ export function RuntimeRisk({
               <ul className="risk-flags">
                 {exposure.flags.map((flag) => <li key={flag}>{flag}</li>)}
               </ul>
-              {/* Informational, and inside the expansion for that reason: CPU
-                  throttles under pressure where memory kills, so its ratio never
-                  earns a chip of its own. */}
-              <p className="risk-note">{exposure.cpuMaxLimitPercent !== null
-                ? `CPU limits reach ${exposure.cpuMaxLimitPercent}% of allocatable on the most overcommitted node. CPU is compressible, so such a node throttles rather than runs out.`
-                : 'No placed pod declares a CPU limit, so there is no CPU overcommit ratio to report.'}</p>
             </details>
           )}
         </div>
@@ -154,6 +149,14 @@ export function RuntimeRisk({
           : 'No nodes were packed for this pool, so runtime risk was not evaluated.'}</p>
       )}
       {contention.basisNote !== null && <p className="risk-note">{contention.basisNote}</p>}
+      {/* A reading, not a finding, and printed wherever the engine measured one:
+          no chip, no colour, no expansion to open. CPU throttles under pressure
+          where memory kills, so an overcommitted node is not a dying one — but
+          that is a reason to say it quietly, not to say it only when the memory
+          side fires. Gated on that, a pool with clean memory and CPU limits at
+          three times allocatable reads as having nothing to report. Silent when
+          nothing declares a CPU limit, so an all-clear stays one line. */}
+      {exposure.cpuNote !== null && <p className="risk-note">{exposure.cpuNote}</p>}
       {/* Cluster-wide, not per-pool — these sum every workload in the scenario.
           The sums are kept as they shipped, so the tiles say whose they are rather
           than quietly re-scoping a shipped number under a per-pool heading. */}

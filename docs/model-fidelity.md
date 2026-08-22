@@ -246,6 +246,20 @@ deducted from allocatable rather than counted as a ceiling, so DaemonSet pods wh
 exceed the configured reservation can exhaust a node kcap reports as clear.
 `engine.py` `_evaluate_limit_exposure` ⇄ [`synchronize`](https://github.com/kubernetes/kubernetes/blob/v1.33.0/pkg/kubelet/eviction/eviction_manager.go#L243), [`GetContainerOOMScoreAdjust`](https://github.com/kubernetes/kubernetes/blob/v1.33.0/pkg/kubelet/qos/policy.go#L45)
 
+**CPU overcommit.** kcap sums the declared CPU limits of each packed node's pods against its
+allocatable CPU and reports the worst node's ratio wherever it has one — a reading beside the
+memory finding, never a finding of its own, and it moves no node number. It says so because CPU
+is compressible upstream: a limit becomes a CFS quota on that container's own cgroup, so a node
+whose declared limits sum past its allocatable does not fail. Each container is held at its own
+ceiling and the ones competing for what remains are throttled, which is the outcome the ratio
+above 100% describes. Two departures follow. A pod that declares no CPU limit contributes
+nothing to kcap's ratio while being the pod upstream leaves unthrottled, so the figure is a
+statement about declarations and understates real CPU pressure exactly where limits are missing.
+And the ratio is not a throttling prediction: whether a container is actually throttled depends
+on live demand and on the `cpu.shares` weighting kcap models separately as a worst-case share,
+not on this sum.
+`engine.py` `_evaluate_limit_exposure` (`cpu_max_limit_percent`) ⇄ [`MilliCPUToQuota`](https://github.com/kubernetes/kubernetes/blob/v1.33.0/pkg/kubelet/cm/helpers_linux.go#L61), [`MilliCPUToShares`](https://github.com/kubernetes/kubernetes/blob/v1.33.0/pkg/kubelet/cm/helpers_linux.go#L88)
+
 ## Node capacity
 
 **Allocatable.** kcap's allocatable is `machine − reserved`, one flat number per pool, taken from

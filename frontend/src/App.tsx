@@ -567,7 +567,16 @@ function ResultsPanel({
     <aside className={`results-panel${stale ? ' is-stale' : ''}`}>
       <header className="results-header">
         <div><span className="eyebrow">{autoRun ? 'Live impact' : 'Simulation'}</span><h2>Capacity projection</h2></div>
-        <span className={`change-chip num${stale ? ' is-stale' : ''}`}>{counted(changeCount, 'change')}</span>
+        {/* `changeCount` is read off the engine's `configuration_diff`, which
+            describes the configuration the engine was last given — so while a run
+            is held it counts the edits already in the result, not the ones waiting
+            for it, and it would read `0 changes` on a panel with one edit pending.
+            Recomputing the diff here would put a second implementation of it in the
+            UI, so the chip stops counting instead and says what it does know. It
+            drops `num` with the number: there are no digits left to align. */}
+        <span className={`change-chip${stale ? ' is-stale' : ' num'}`}>
+          {stale ? 'edited since last run' : counted(changeCount, 'change')}
+        </span>
       </header>
 
       <div className="run-bar">

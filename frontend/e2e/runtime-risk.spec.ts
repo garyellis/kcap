@@ -161,10 +161,12 @@ test.describe('Runtime risk', () => {
     // Prose, composed by the engine so that every consumer of the API reports
     // exhaustion in the same words. The clause quoted is the finding itself.
     await expect(kcap.runtimeRisk).toContainText('can be exhausted by pods behaving within their limits')
-    // The CPU ratio rides along inside the expansion and never earns a chip of
-    // its own, because an overcommitted node throttles rather than dies.
+    // The CPU ratio never earns a chip of its own, because an overcommitted node
+    // throttles rather than dies. It is printed as a plain line wherever the
+    // engine measured one — including on the all-clear read above, which is the
+    // point: it is a reading, not a consequence of the memory finding.
     await expect(kcap.runtimeRisk).toContainText(
-      'CPU is compressible, so such a node throttles rather than runs out.',
+      'CPU is compressible, so a node over 100% throttles rather than runs out.',
     )
   })
 

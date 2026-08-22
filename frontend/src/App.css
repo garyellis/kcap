@@ -322,8 +322,14 @@
 .run-button:hover { background: var(--accent-strong); }
 .run-button:disabled { opacity: .45; cursor: not-allowed; }
 .run-button kbd { padding: 1px 5px; border-radius: 5px; background: rgba(255, 255, 255, .22); font: 500 11px var(--font-mono); }
-.segmented, .result-content { transition: opacity 200ms ease; }
-.results-panel.is-stale .segmented, .results-panel.is-stale .result-content { opacity: .55; }
+/* Manual mode holds the run, so every reading the panel shows is about the
+   configuration the engine last saw, not the one on screen. Dim all of it.
+   The selector excludes rather than lists: the header and the run bar are the
+   controls that explain the dimming and undo it — everything else is a reading
+   that went out of date, including a section added to this panel later, which
+   dims the moment it exists instead of the day someone remembers this rule. */
+.results-panel > :not(.results-header):not(.run-bar) { transition: opacity 200ms ease; }
+.results-panel.is-stale > :not(.results-header):not(.run-bar) { opacity: .55; }
 .change-chip.is-stale { background: var(--warn-tint); border-color: var(--warn-line); color: var(--warn); }
 
 .segmented { margin: 0 20px 4px; padding: 2px; border-radius: 8px; display: grid; grid-template-columns: repeat(5, 1fr); background: var(--track); }
@@ -335,7 +341,14 @@
 .segmented span { display: block; overflow: hidden; font-size: 12px; font-weight: 500; text-overflow: ellipsis; white-space: nowrap; }
 .segmented small { display: block; margin-top: 1px; color: var(--text-3); font: 450 11px var(--font-mono); font-variant-numeric: tabular-nums; white-space: nowrap; }
 
-.result-content { animation: resultIn 200ms ease-out both; }
+/* Deliberately no fill mode. `resultIn` ends at `opacity: 1`, and a retained
+   animation value — `forwards`, or the `both` this rule used to carry — outranks
+   every normal declaration in the cascade, for as long as the element lives. The
+   finished entry animation therefore went on deciding this element's opacity, and
+   the stale rule above could never dim the results body no matter how it was
+   written. Letting the animation end hands opacity back to the cascade; the last
+   keyframe is the element's resting state anyway, so retaining it bought nothing. */
+.result-content { animation: resultIn 200ms ease-out; }
 
 .verdict { margin: 12px 20px 0; padding: 16px; border-radius: 8px; display: flex; align-items: center; justify-content: space-between; gap: 16px; }
 .verdict--blocked { background: var(--bad-tint); }

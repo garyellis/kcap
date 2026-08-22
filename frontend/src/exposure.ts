@@ -4,7 +4,7 @@ import type { PoolScenarioResult } from './api'
 //
 // The block answers the incompressible question the packing does not: if every
 // pod on a node grew to the ceiling it declared, would the node survive it? The
-// panel asks three things of it that its own shape does not answer:
+// panel asks four things of it that its own shape does not answer:
 //
 // 1. *Was exposure even evaluated?* `limit_exposure` is null when the packer
 //    opened no nodes — the same condition that nulls `cpu_contention`, and the
@@ -17,6 +17,9 @@ import type { PoolScenarioResult } from './api'
 //    it. Reading the count would hide exactly that flag.
 // 3. *What does the chip say?* Which is the same question, from the other side
 //    — see `exhaustibleNodeCount` below.
+// 4. *Is there a CPU reading, and what does it say?* The block carries the CPU
+//    ratio on every packing it evaluated, memory flags or none. It is a
+//    reading, not a finding — see `cpuNote` below.
 
 type LimitExposure = NonNullable<PoolScenarioResult['limit_exposure']>
 
@@ -38,8 +41,18 @@ export interface ExposureReadout {
   unlimitedPodCount: number
   /** The worst node's memory ceilings as a percentage of its allocatable. */
   memoryMaxLimitPercent: number
-  /** The same ratio for CPU, or null when no placed pod declares a limit. */
-  cpuMaxLimitPercent: number | null
+  /**
+   * The CPU overcommit reading as one line, or null when there is none: either
+   * nothing was packed, or no placed pod declares a CPU limit.
+   *
+   * Deliberately independent of `kind`. CPU throttles under pressure where
+   * memory kills, which is why the ratio earns no chip of its own — that is an
+   * argument for saying it quietly, not for saying it only when the memory
+   * side happens to have fired. A pool with clean memory and CPU limits at
+   * three times allocatable has a reading, and withholding it reads as having
+   * nothing to report.
+   */
+  cpuNote: string | null
   /** The engine's sentences, untouched and in the order it emitted them. */
   flags: readonly string[]
 }
@@ -53,7 +66,7 @@ export function exposureReadout(exposure: LimitExposure | null): ExposureReadout
       nodesEvaluated: 0,
       unlimitedPodCount: 0,
       memoryMaxLimitPercent: 0,
-      cpuMaxLimitPercent: null,
+      cpuNote: null,
       flags: [],
     }
   }
@@ -63,7 +76,24 @@ export function exposureReadout(exposure: LimitExposure | null): ExposureReadout
     nodesEvaluated: exposure.nodes_evaluated,
     unlimitedPodCount: exposure.memory_unlimited_pod_count,
     memoryMaxLimitPercent: exposure.memory_max_limit_percent,
-    cpuMaxLimitPercent: exposure.cpu_max_limit_percent,
+    cpuNote: cpuOvercommitNote(exposure.cpu_max_limit_percent),
     flags: exposure.flags,
   }
+}
+
+/**
+ * The CPU ratio as the line the panel prints, or null when the engine measured
+ * no ratio because nothing declared a CPU limit.
+ *
+ * The wording holds at any ratio, which is what lets the line be printed
+ * wherever there is one: naming "the most overcommitted node" would be a
+ * superlative over a property no node has at 44%. So the node is named by what
+ * it declares, and the 100% mark is named explicitly rather than assumed.
+ */
+function cpuOvercommitNote(percent: number | null): string | null {
+  if (percent === null) return null
+  return (
+    `CPU limits reach ${percent}% of allocatable on the node that declares the most. ` +
+    'CPU is compressible, so a node over 100% throttles rather than runs out.'
+  )
 }

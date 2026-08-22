@@ -1,1 +1,2 @@
 plugins = ["python"]
+files = ["src/**/*.py", "tests/**/*.py"]

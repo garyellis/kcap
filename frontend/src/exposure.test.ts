@@ -67,15 +67,34 @@ describe('exposureReadout, on what the chip reads', () => {
 })
 
 describe('exposureReadout, on the CPU ratio', () => {
-  it('carries the ratio when a placed pod declares a CPU limit', () => {
-    expect(block().cpuMaxLimitPercent).toBe(175)
+  it('prints the ratio the engine measured', () => {
+    expect(block().cpuNote).toContain('175%')
   })
 
-  it('reports no ratio when nothing declares one', () => {
-    expect(block({ cpu_max_limit_percent: null }).cpuMaxLimitPercent).toBeNull()
+  // The reading is independent of the memory flags, and the fixture above is a
+  // clear block on purpose: gating the ratio on a memory finding is how a pool
+  // with clean memory and CPU limits at 175% of allocatable came to read as
+  // having nothing to report at all.
+  it('prints the ratio on a clear pool, where no memory flag fired', () => {
+    const readout = block()
+    expect(readout.kind).toBe('clear')
+    expect(readout.cpuNote).not.toBeNull()
   })
 
-  it('has no ratio to report when nothing was evaluated', () => {
-    expect(exposureReadout(null).cpuMaxLimitPercent).toBeNull()
+  // Every ratio the line is printed at is a legitimate one, so it may not read
+  // as a finding at 44% or assume a node is over its allocatable.
+  it('names the node by what it declares, and names the 100% mark', () => {
+    expect(block({ cpu_max_limit_percent: 44 }).cpuNote).toBe(
+      'CPU limits reach 44% of allocatable on the node that declares the most. ' +
+        'CPU is compressible, so a node over 100% throttles rather than runs out.',
+    )
+  })
+
+  it('says nothing when no placed pod declares a CPU limit', () => {
+    expect(block({ cpu_max_limit_percent: null }).cpuNote).toBeNull()
+  })
+
+  it('has nothing to report when nothing was evaluated', () => {
+    expect(exposureReadout(null).cpuNote).toBeNull()
   })
 })
