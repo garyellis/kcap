@@ -2900,9 +2900,11 @@ class TestScaleDownGating:
         assert pool_result.current_nodes - pool_result.effective_nodes_required == 4
         assert scenario.nodes_to_remove == 0
 
-    def test_a_pool_with_nothing_placeable_keeps_its_nodes(self) -> None:
-        # Scaled to zero replicas: nothing is oversized, there is simply no
-        # demand to size the running nodes against.
+    def test_an_idle_pool_with_no_minimum_keeps_its_nodes(self) -> None:
+        # Scaled to zero replicas against a pool with no floor: nothing is
+        # oversized, there is simply no demand to size the running nodes
+        # against, and the ungated removal would strip the pool to zero. That
+        # is the one case the gate exists for.
         cluster = cluster_with(
             Workload("api", Resources(250, 128), current_replicas=0),
             min_nodes=0,
@@ -2919,6 +2921,93 @@ class TestScaleDownGating:
         assert pool_result.nodes_to_remove == 0
         assert pool_result.scale_down_blocked_reason == "no_placeable_demand"
         assert pool_result.current_nodes - pool_result.effective_nodes_required == 3
+        assert scenario.nodes_to_remove == 0
+
+    def test_an_idle_pool_drains_to_its_configured_minimum(self) -> None:
+        # The other side of that boundary. Nothing is placeable here either, but
+        # the pool's floor is 3, and `validate` guarantees a floor no higher
+        # than the running count — so draining 8 nodes to 3 is a safe, real
+        # instruction rather than the strip-to-zero the gate withholds.
+        cluster = cluster_with(
+            Workload("api", Resources(250, 128), current_replicas=0),
+            min_nodes=3,
+            current_nodes=8,
+            max_nodes=10,
+        )
+
+        scenario = evaluate(cluster).scenarios["current"]
+        pool_result = scenario.pools["default"]
+
+        assert pool_result.pod_count == 0
+        assert pool_result.oversized_pod_count == 0
+        assert pool_result.effective_nodes_required == 3
+        assert pool_result.nodes_to_remove == 5
+        assert pool_result.scale_down_blocked_reason is None
+        assert pool_result.current_nodes - pool_result.effective_nodes_required == 5
+        assert scenario.nodes_to_remove == 5
+
+    def test_an_idle_pool_drains_to_a_minimum_of_one(self) -> None:
+        # The narrowest floor there is. A minimum of 1 still leaves the pool
+        # running a node, so this belongs on the instructing side too — pinning
+        # the gate to effective_nodes_required == 0 exactly, and not to some
+        # "nearly idle" band above it.
+        cluster = cluster_with(
+            Workload("api", Resources(250, 128), current_replicas=0),
+            min_nodes=1,
+            current_nodes=4,
+            max_nodes=10,
+        )
+
+        scenario = evaluate(cluster).scenarios["current"]
+        pool_result = scenario.pools["default"]
+
+        assert pool_result.effective_nodes_required == 1
+        assert pool_result.nodes_to_remove == 3
+        assert pool_result.scale_down_blocked_reason is None
+        assert scenario.nodes_to_remove == 3
+
+    def test_an_idle_pool_already_at_its_floor_is_not_blocked(self) -> None:
+        # Floor and running count are the same, so there is no removal to
+        # withhold: the pool is where an autoscaler would leave it, and it reads
+        # as the steady state it is. Pinned because it is the one state here
+        # where no number moves and only the reason does.
+        cluster = cluster_with(
+            Workload("api", Resources(250, 128), current_replicas=0),
+            min_nodes=3,
+            current_nodes=3,
+            max_nodes=10,
+        )
+
+        scenario = evaluate(cluster).scenarios["current"]
+        pool_result = scenario.pools["default"]
+
+        assert pool_result.pod_count == 0
+        assert pool_result.effective_nodes_required == 3
+        assert pool_result.nodes_to_remove == 0
+        assert pool_result.scale_down_blocked_reason is None
+        assert pool_result.current_nodes - pool_result.effective_nodes_required == 0
+
+    def test_oversized_pods_keep_their_block_at_a_non_zero_minimum(self) -> None:
+        # An oversized pod is excluded from the sizing, so the pool is sized
+        # against demand that is not all of its demand. That stays blocked at
+        # any floor: the floor here is 3 of 8 running nodes, exactly the shape
+        # that instructs a removal when the pool is merely idle.
+        cluster = cluster_with(
+            Workload("api", Resources(5000, 128), current_replicas=3),
+            machine=MachineSpec(cpu_m=4000, memory_mib=8192),
+            min_nodes=3,
+            current_nodes=8,
+            max_nodes=10,
+        )
+
+        scenario = evaluate(cluster).scenarios["current"]
+        pool_result = scenario.pools["default"]
+
+        assert pool_result.oversized_pod_count == 3
+        assert pool_result.effective_nodes_required == 3
+        assert pool_result.nodes_to_remove == 0
+        assert pool_result.scale_down_blocked_reason == "oversized_pods"
+        assert pool_result.current_nodes - pool_result.effective_nodes_required == 5
         assert scenario.nodes_to_remove == 0
 
     def test_oversized_pods_block_the_scale_down_beside_placeable_demand(self) -> None:

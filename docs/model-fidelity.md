@@ -187,11 +187,15 @@ The HPA scenarios show the shape of a response, not a converged steady state.
 **Node instructions.** `nodes_to_add` and `nodes_to_remove` are sizing arithmetic against the
 configured current node count, not a Cluster Autoscaler simulation: no candidate scan, no
 utilization threshold, no unreplicated-pod or PDB blocker, no cooldown. kcap additionally
-withholds the removal — 0, with `scale_down_blocked_reason` naming the case — whenever pods were
-excluded from the sizing as oversized, or nothing was placeable at all; a real autoscaler faced
-with an idle pool does drain it toward its minimum, and kcap declines to say so because a node
-count sized against demand it never placed is arithmetic rather than an instruction. That
-arithmetic stays derivable as `max(0, current_nodes − effective_nodes_required)`.
+withholds the removal — 0, with `scale_down_blocked_reason` naming the case — in two situations.
+Pods excluded from the sizing as oversized block it, because the pool was then sized against
+demand that is not all of its demand. And an idle pool with no configured minimum blocks it,
+because the arithmetic there instructs removing every node the pool runs; a real autoscaler can
+take a node group to zero, and kcap will not say so from a node count sized against demand it
+never placed. An idle pool that does keep a minimum is drained to that minimum, which is what a
+real autoscaler does — `min_nodes <= current_nodes` is validated, so the floor is always reachable
+by removal. The withheld arithmetic stays derivable as
+`max(0, current_nodes − effective_nodes_required)`.
 `engine.py` `_evaluate_pool_scenario` ⇄ no upstream analogue
 
 ## Rollout

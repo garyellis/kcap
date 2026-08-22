@@ -180,6 +180,28 @@ def test_evaluate_withholds_a_scale_down_with_no_placeable_demand(
     assert pool["limit_exposure"] is None
 
 
+def test_evaluate_drains_an_idle_pool_to_its_minimum(
+    client: TestClient,
+    cluster_payload: dict[str, Any],
+) -> None:
+    # Scaled to zero against a pool that keeps a floor of one node: the drain
+    # from four nodes to that floor is safe, so the response carries the real
+    # removal and no blocked reason.
+    payload = deepcopy(cluster_payload)
+    payload["workloads"]["api"]["current_replicas"] = 0
+    payload["node_pools"]["default"]["min_nodes"] = 1  # the fixture's default, stated
+    payload["node_pools"]["default"]["current_nodes"] = 4
+
+    response = client.post("/v1/evaluate", json=payload)
+
+    assert response.status_code == 200
+    pool = response.json()["scenarios"]["current"]["pools"]["default"]
+    assert pool["pod_count"] == 0
+    assert pool["effective_nodes_required"] == 1
+    assert pool["nodes_to_remove"] == 3
+    assert pool["scale_down_blocked_reason"] is None
+
+
 def test_evaluate_reports_limit_exposure(
     client: TestClient,
     cluster_payload: dict[str, Any],

@@ -507,7 +507,7 @@ export type PoolScenarioResultSchema = {
     /**
      * Scale Down Blocked Reason
      *
-     * Why no scale-down is being instructed: 'oversized_pods' when pods too large for any node were excluded from the sizing, 'no_placeable_demand' when a pool running nodes has nothing left to place, null otherwise. When set, nodes_to_remove is 0; the ungated difference remains current_nodes - effective_nodes_required.
+     * Why no scale-down is being instructed: 'oversized_pods' when pods too large for any node were excluded from the sizing, 'no_placeable_demand' when a pool running nodes has nothing left to place and a floor of zero, so the only removal available would strip it to no nodes; null otherwise. When set, nodes_to_remove is 0; the ungated difference remains current_nodes - effective_nodes_required.
      */
     scale_down_blocked_reason?: 'oversized_pods' | 'no_placeable_demand' | null;
     /**

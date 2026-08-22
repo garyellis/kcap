@@ -208,6 +208,8 @@ class WorkloadResult:
         return None
 
 
+# "no_placeable_demand" is narrower than its name: it is the idle pool that also
+# keeps no floor, the only one whose removal would strip it to no nodes at all.
 ScaleDownBlockedReason = Literal["oversized_pods", "no_placeable_demand"]
 
 
@@ -1888,13 +1890,26 @@ def _evaluate_pool_scenario(
     effective_nodes_required = max(nodes_required, pool.min_nodes)
     nodes_to_add = max(0, effective_nodes_required - pool.current_nodes)
 
-    # A removal only instructs when the sizing placed every pod behind it:
-    # oversized pods were excluded above, and a pool with nothing placeable at
-    # all would be told to remove every node it runs on.
+    # A removal only instructs when the sizing placed every pod behind it, so a
+    # pool holding an oversized pod is sized against demand that is not all of
+    # its demand and is never told to shrink.
+    #
+    # An idle pool is different: it is sized honestly, at its configured floor,
+    # and draining to that floor is what an autoscaler does. The floor is never
+    # overshot — effective_nodes_required is itself max(..., min_nodes), so what
+    # survives the removal is that floor. `validate` enforcing
+    # min_nodes <= current_nodes is what makes the drain reachable rather than a
+    # no-op. The one case worth withholding is a floor of 0, where the removal
+    # would strip the pool to no nodes at all.
+    #
+    # Reaching zero needs both a zero floor and nothing placeable to size
+    # against, which is why the reason below still names what it names.
+    would_strip_the_pool_bare = effective_nodes_required == 0 and pool.current_nodes > 0
+
     scale_down_blocked_reason: ScaleDownBlockedReason | None = None
     if oversized_pods:
         scale_down_blocked_reason = "oversized_pods"
-    elif placeable_pod_count == 0 and pool.current_nodes > 0:
+    elif would_strip_the_pool_bare:
         scale_down_blocked_reason = "no_placeable_demand"
 
     nodes_to_remove = (
