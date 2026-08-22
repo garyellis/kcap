@@ -42,6 +42,11 @@ Keep assumptions visible. Never present an approximation as Kubernetes parity.
 - `frontend/e2e/` is the Playwright suite for scenarios promoted out of
   `docs/ui-regression-scenarios.md`. It drives the built UI from outside and imports
   nothing from `src/`; `frontend/e2e/support/kcap.ts` states its selector policy.
+- Frontend vitest suites are pure-module. `components/Fields.test.tsx` is the exception
+  and stays a narrow one: it renders the field under jsdom, declared per file so every
+  other suite keeps the node environment. Reach for a rendered test only where the claim
+  is about what a component *displays* given how a caller answered it, which no pure
+  function holds. A claim an operator would state as a gesture belongs in `frontend/e2e/`.
 - The production image builds Vite and serves it through FastAPI on port 8100.
 
 Stack: Python 3.13, uv, FastAPI, Pydantic, pytest, React, TypeScript, Vite, Vitest,

@@ -39,27 +39,33 @@ export function NumberField({
   sliderMax,
 }: NumberFieldProps) {
   const id = useId()
-  const [draft, setDraft] = useState(String(value))
-
-  useEffect(() => setDraft(String(value)), [value])
+  // The box reads the stored value, and holds text of its own only while it is
+  // being typed in. What a caller stores need not be what this field committed —
+  // a peak is raised to the average, a surge percent lands on a different pod
+  // count — so text that outlives its edit is text the model has already
+  // overruled: dragging the slider across a span that all stores one value must
+  // leave the box on that value, not on a position that stored nothing.
+  // The caller therefore owns the number between edits and must apply `onChange`
+  // into `value` synchronously — a deferred update would read as a revert.
+  const [draft, setDraft] = useState<string | null>(null)
 
   const commit = () => {
-    const parsed = Number(draft)
-    if (!Number.isFinite(parsed)) {
-      setDraft(String(value))
-      return
-    }
+    // No draft means a focus and a blur with nothing typed, which still
+    // normalizes: a value stranded outside bounds a sibling field moved is
+    // corrected the same way a typed one is.
+    const parsed = draft === null ? value : Number(draft)
+    setDraft(null)
+    if (!Number.isFinite(parsed)) return
     const bounded = normalizeFieldValue(parsed, { min, max, step, fractional })
-    setDraft(String(bounded))
     if (bounded !== value) onChange(bounded)
   }
 
+  // Both keys leave the field, and leaving it commits. Escape does not abandon
+  // the draft: the blur it triggers runs inside this same event, before React
+  // has applied any state that would clear one. Spelling that out rather than
+  // clearing the draft here, which would read as a cancel that does not happen.
   const handleKeyDown = (event: KeyboardEvent<HTMLInputElement>) => {
-    if (event.key === 'Enter') event.currentTarget.blur()
-    if (event.key === 'Escape') {
-      setDraft(String(value))
-      event.currentTarget.blur()
-    }
+    if (event.key === 'Enter' || event.key === 'Escape') event.currentTarget.blur()
   }
 
   // The rail starts on a practical tuning range and auto-ranges like a
@@ -99,7 +105,7 @@ export function NumberField({
           id={id}
           type="number"
           inputMode="decimal"
-          value={draft}
+          value={draft ?? String(value)}
           min={min}
           max={max}
           // A fractional field keeps `step` for the slider's granularity but
@@ -137,7 +143,6 @@ export function NumberField({
           onPointerUp={() => setSliding(false)}
           onChange={(event) => {
             const next = Number(event.target.value)
-            setDraft(String(next))
             if (next !== value) onChange(next)
           }}
         />
@@ -159,6 +164,12 @@ export function TextField({ label, value, onCommit, hint }: TextFieldProps) {
   const [draft, setDraft] = useState(value)
   const [invalid, setInvalid] = useState(false)
 
+  // A name field can keep the mirrored draft the number field gave up, because
+  // its commit is answered: a refusal comes back as `false` and resets the draft
+  // here, rather than being inferred from the stored value not moving. The
+  // untouched case is a caller that *accepts* a name and stores the one it
+  // already had — a rename normalized back onto itself — which leaves the typed
+  // text on screen for want of a change to resync from.
   useEffect(() => setDraft(value), [value])
 
   const commit = () => {
