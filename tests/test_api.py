@@ -155,6 +155,39 @@ def test_evaluate_withholds_a_scale_down_for_oversized_pods(
     assert pool["current_nodes"] - pool["effective_nodes_required"] == 1
 
 
+def test_evaluate_scopes_placeable_demand_and_stranded_capacity(
+    client: TestClient,
+    cluster_payload: dict[str, Any],
+) -> None:
+    # A partly-oversized pool: the four 500m pods fit the fixture's 3800m
+    # allocatable node, the two 6000m ones fit nothing. The node target is
+    # sized from the four, so the response has to carry what those four ask
+    # for as well as what the whole pool does.
+    payload = deepcopy(cluster_payload)
+    payload["workloads"]["batch"] = {
+        "name": "batch",
+        "resources": {"cpu_request_m": 6000, "memory_request_mib": 256},
+        "current_replicas": 2,
+    }
+
+    response = client.post("/v1/evaluate", json=payload)
+
+    assert response.status_code == 200
+    pool = response.json()["scenarios"]["current"]["pools"]["default"]
+    assert pool["oversized_pod_count"] == 2
+    assert pool["effective_nodes_required"] == 1
+    assert pool["capacity_cpu_m"] == 3800
+    assert pool["cpu_requested_m"] == 4 * 500 + 2 * 6000
+    assert pool["placeable_cpu_m"] == 4 * 500
+    assert pool["memory_requested_mib"] == 4 * 256 + 2 * 256
+    assert pool["placeable_memory_mib"] == 4 * 256
+    # Stranded is what the node target provisions and no placed pod claims, so
+    # it is measured against the placeable demand. Against the whole pool's
+    # demand it would floor at 0 and report a node nothing can fill as full.
+    assert pool["stranded_cpu_m"] == 3800 - 4 * 500
+    assert pool["stranded_memory_mib"] == 7680 - 4 * 256
+
+
 def test_evaluate_withholds_a_scale_down_with_no_placeable_demand(
     client: TestClient,
     cluster_payload: dict[str, Any],

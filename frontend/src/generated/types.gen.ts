@@ -493,6 +493,18 @@ export type PoolScenarioResultSchema = {
      */
     oversized_pod_count: number;
     /**
+     * Placeable Cpu M
+     *
+     * CPU requested by the pods the packer could place, in millicores. Equals cpu_requested_m unless oversized_pod_count is above 0. The node target is sized from this figure, so it is the numerator a saturation ratio against capacity_cpu_m needs. Exclusion is per pod, not per resource: a pod too large for the node's memory drops out of this CPU total too.
+     */
+    placeable_cpu_m: number;
+    /**
+     * Placeable Memory Mib
+     *
+     * Memory requested by the pods the packer could place, in MiB. The memory counterpart of placeable_cpu_m, on the same terms.
+     */
+    placeable_memory_mib: number;
+    /**
      * Pod Count
      */
     pod_count: number;
@@ -516,10 +528,14 @@ export type PoolScenarioResultSchema = {
     schedulable: boolean;
     /**
      * Stranded Cpu M
+     *
+     * Provisioned CPU that no placeable pod claims: capacity_cpu_m minus placeable_cpu_m, floored at 0. Scoped to the placeable pods because the capacity it subtracts from was sized from them.
      */
     stranded_cpu_m: number;
     /**
      * Stranded Memory Mib
+     *
+     * Provisioned memory that no placeable pod claims, on the same terms as stranded_cpu_m.
      */
     stranded_memory_mib: number;
 };

@@ -513,10 +513,37 @@ class PoolScenarioResultSchema(ApiModel):
     pod_count: int
     cpu_requested_m: int
     memory_requested_mib: int
+    placeable_cpu_m: int = Field(
+        description=(
+            "CPU requested by the pods the packer could place, in millicores. "
+            "Equals cpu_requested_m unless oversized_pod_count is above 0. The "
+            "node target is sized from this figure, so it is the numerator a "
+            "saturation ratio against capacity_cpu_m needs. Exclusion is per "
+            "pod, not per resource: a pod too large for the node's memory "
+            "drops out of this CPU total too."
+        ),
+    )
+    placeable_memory_mib: int = Field(
+        description=(
+            "Memory requested by the pods the packer could place, in MiB. The "
+            "memory counterpart of placeable_cpu_m, on the same terms."
+        ),
+    )
     capacity_cpu_m: int
     capacity_memory_mib: int
-    stranded_cpu_m: int
-    stranded_memory_mib: int
+    stranded_cpu_m: int = Field(
+        description=(
+            "Provisioned CPU that no placeable pod claims: capacity_cpu_m minus "
+            "placeable_cpu_m, floored at 0. Scoped to the placeable pods "
+            "because the capacity it subtracts from was sized from them."
+        ),
+    )
+    stranded_memory_mib: int = Field(
+        description=(
+            "Provisioned memory that no placeable pod claims, on the same terms "
+            "as stranded_cpu_m."
+        ),
+    )
     nodes_required: int
     effective_nodes_required: int
     current_nodes: int

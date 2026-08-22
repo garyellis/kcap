@@ -24,7 +24,8 @@ Keep assumptions visible. Never present an approximation as Kubernetes parity.
   breakdown the pod-level editor has just contradicted; `contention.ts` and
   `exposure.ts` read the engine's CPU-contention and node-limit-exposure blocks
   for the Runtime risk section; `format.ts` prints millicores and MiB as an
-  operator reads them; `components/` and
+  operator reads them; `populations.ts` names which pod population each of the
+  results panel's readings is about; `components/` and
   `App.tsx` are the React UI. Every plain `.ts` at the root of `frontend/src/`
   is core and may not import a React module; the `core-does-not-import-ui` rule
   in `frontend/dependency-cruiser.config.mjs` enforces that by pattern rather

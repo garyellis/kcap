@@ -328,8 +328,24 @@ class PoolScenarioResult:
     pool: str
     pod_count: int
 
+    # Everything the pool asks for, oversized pods included.
     cpu_requested_m: int
     memory_requested_mib: int
+
+    # The part of that demand the packer could place. The node math is sized
+    # from these, so any ratio against the capacity below has to be about the
+    # same pods; a consumer that re-derived them would be re-implementing the
+    # packer's fit test. They equal the totals above whenever
+    # oversized_pod_count is 0.
+    #
+    # "Placeable" is the packer's verdict on a whole pod, not a per-resource
+    # test: a pod too tall for the node's memory is excluded from the CPU total
+    # as well, because it is the pod that will not be placed. The placeable pod
+    # *count* is deliberately not carried here — it is pod_count minus
+    # oversized_pod_count, so a consumer can reach it without re-deriving
+    # anything the packer knows.
+    placeable_cpu_m: int
+    placeable_memory_mib: int
 
     # Schedulable capacity of the effective node target. Derived here so the
     # numerator and denominator of a saturation readout always come from the
@@ -374,11 +390,22 @@ class PoolScenarioResult:
 
     @property
     def stranded_cpu_m(self) -> int:
-        return max(0, self.capacity_cpu_m - self.cpu_requested_m)
+        """Provisioned CPU no placeable pod claims.
+
+        Measured against the placeable demand, because the capacity it
+        subtracts from was sized from those same pods: an oversized pod leaves
+        the node count untouched, so counting its request here would report
+        capacity as spoken for by a pod that will never occupy it.
+
+        The floor never engages — the node target is sized to hold the
+        placeable demand, so capacity is never below it. It is defensive.
+        """
+        return max(0, self.capacity_cpu_m - self.placeable_cpu_m)
 
     @property
     def stranded_memory_mib(self) -> int:
-        return max(0, self.capacity_memory_mib - self.memory_requested_mib)
+        """Provisioned memory no placeable pod claims, on the same terms."""
+        return max(0, self.capacity_memory_mib - self.placeable_memory_mib)
 
 
 @dataclass(frozen=True)
@@ -388,6 +415,11 @@ class ScenarioResult:
     Fields that only make sense against one machine shape (limiting resource,
     headroom, density, capacity) stay on PoolScenarioResult; aggregating them
     across differently-shaped pools would fabricate a number nobody configured.
+
+    The request totals here are the whole cluster's demand, oversized pods
+    included, and stay that way: there is no cluster-wide capacity to divide
+    them by, so no ratio here can mix the two pod populations. Anything that
+    grows one later needs the placeable totals per pool, not these.
     """
 
     name: str
@@ -1925,6 +1957,8 @@ def _evaluate_pool_scenario(
         pod_count=pod_count,
         cpu_requested_m=cpu_requested_m,
         memory_requested_mib=memory_requested_mib,
+        placeable_cpu_m=placeable_cpu_m,
+        placeable_memory_mib=placeable_memory_mib,
         capacity_cpu_m=effective_nodes_required * machine.allocatable_cpu_m,
         capacity_memory_mib=(effective_nodes_required * machine.allocatable_memory_mib),
         nodes_required=nodes_required,

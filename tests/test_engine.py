@@ -2796,6 +2796,196 @@ class TestRolloutAbsoluteSurge:
 
 
 class TestSaturationAndConstraint:
+    def test_placeable_demand_equals_the_full_demand_when_every_pod_fits(
+        self,
+    ) -> None:
+        cluster = cluster_with(
+            Workload("api", Resources(500, 256), current_replicas=8),
+            machine=MachineSpec(
+                cpu_m=4000,
+                memory_mib=8192,
+                reserved_cpu_m=400,
+                reserved_memory_mib=1536,
+            ),
+            min_nodes=1,
+            current_nodes=2,
+            max_nodes=10,
+        )
+
+        pool = evaluate(cluster).scenarios["current"].pools["default"]
+
+        assert pool.oversized_pod_count == 0
+        assert pool.cpu_requested_m == 8 * 500
+        assert pool.memory_requested_mib == 8 * 256
+        # Nothing was excluded, so the two populations are the same one and the
+        # placeable totals must not diverge from the full ones.
+        assert pool.placeable_cpu_m == pool.cpu_requested_m
+        assert pool.placeable_memory_mib == pool.memory_requested_mib
+        assert pool.effective_nodes_required == 2
+        assert pool.stranded_cpu_m == 2 * 3600 - 8 * 500
+        assert pool.stranded_memory_mib == 2 * 6656 - 8 * 256
+
+    def test_placeable_demand_drops_exactly_the_oversized_pods(self) -> None:
+        # 8000m never fits a 3600m allocatable node; the 1000m pods all do.
+        cluster = ClusterConfig(
+            workloads={
+                "api": Workload("api", Resources(8000, 512), current_replicas=2),
+                "worker": Workload("worker", Resources(1000, 512), current_replicas=3),
+            },
+            node_pools={
+                "default": NodePool(
+                    name="default",
+                    machine=MachineSpec(
+                        cpu_m=4000,
+                        memory_mib=8192,
+                        reserved_cpu_m=400,
+                        reserved_memory_mib=1536,
+                    ),
+                    min_nodes=1,
+                    current_nodes=2,
+                    max_nodes=10,
+                ),
+            },
+        )
+
+        pool = evaluate(cluster).scenarios["current"].pools["default"]
+
+        assert pool.oversized_pod_count == 2
+        assert pool.cpu_requested_m == 2 * 8000 + 3 * 1000
+        assert pool.memory_requested_mib == 5 * 512
+        assert pool.placeable_cpu_m == 3 * 1000
+        assert pool.placeable_memory_mib == 3 * 512
+        # The gap is the excluded pods and nothing else.
+        assert pool.cpu_requested_m - pool.placeable_cpu_m == 2 * 8000
+        assert pool.memory_requested_mib - pool.placeable_memory_mib == 2 * 512
+
+        # The node target is sized from the placeable pods alone, so it is
+        # smaller than the pool's whole CPU demand. Subtracting that whole
+        # demand from it floors at zero and reports a full node as fully
+        # spoken for; subtracting the pods it was actually sized for reports
+        # the 600m of it nothing can use.
+        assert pool.effective_nodes_required == 1
+        assert pool.capacity_cpu_m == 3600
+        assert pool.cpu_requested_m > pool.capacity_cpu_m
+        assert pool.stranded_cpu_m == 3600 - 3 * 1000
+        assert pool.stranded_memory_mib == 6656 - 3 * 512
+
+    def test_a_memory_oversized_pod_leaves_the_cpu_total_too(self) -> None:
+        # "Placeable" is the packer's verdict on a whole pod, not a per-resource
+        # test. This pod is trivial on CPU and impossible on memory, so summing
+        # only the pods that are too wide on CPU would leave its 100m in the CPU
+        # total while the node count it was excluded from never saw it.
+        cluster = ClusterConfig(
+            workloads={
+                "cache": Workload("cache", Resources(100, 99999), current_replicas=2),
+                "worker": Workload("worker", Resources(500, 512), current_replicas=3),
+            },
+            node_pools={
+                "default": NodePool(
+                    name="default",
+                    machine=MachineSpec(
+                        cpu_m=4000,
+                        memory_mib=8192,
+                        reserved_cpu_m=400,
+                        reserved_memory_mib=1536,
+                    ),
+                    min_nodes=1,
+                    current_nodes=2,
+                    max_nodes=10,
+                ),
+            },
+        )
+
+        pool = evaluate(cluster).scenarios["current"].pools["default"]
+
+        assert pool.oversized_pod_count == 2
+        assert pool.cpu_requested_m == 2 * 100 + 3 * 500
+        assert pool.memory_requested_mib == 2 * 99999 + 3 * 512
+        # The assertion that matters: the CPU total drops because of a pod that
+        # is oversized on memory.
+        assert pool.placeable_cpu_m == 3 * 500
+        assert pool.placeable_memory_mib == 3 * 512
+        assert pool.capacity_cpu_m == 3600
+        assert pool.stranded_cpu_m == 3600 - 3 * 500
+        assert pool.stranded_memory_mib == 6656 - 3 * 512
+
+    def test_a_wholly_oversized_pool_strands_the_whole_node_floor(self) -> None:
+        # Nothing places, so the pool sits at its configured floor and every
+        # core that floor provisions is stranded. The placeable totals are the
+        # empty sum, not the pool's demand.
+        cluster = cluster_with(
+            Workload("api", Resources(8000, 512), current_replicas=3),
+            machine=MachineSpec(
+                cpu_m=4000,
+                memory_mib=8192,
+                reserved_cpu_m=400,
+                reserved_memory_mib=1536,
+            ),
+            min_nodes=3,
+            current_nodes=3,
+            max_nodes=10,
+        )
+
+        pool = evaluate(cluster).scenarios["current"].pools["default"]
+
+        assert pool.oversized_pod_count == 3
+        assert pool.pod_count == 3
+        assert pool.cpu_requested_m == 3 * 8000
+        assert pool.placeable_cpu_m == 0
+        assert pool.placeable_memory_mib == 0
+        assert pool.nodes_required == 0
+        assert pool.effective_nodes_required == 3
+        assert pool.capacity_cpu_m == 3 * 3600
+        # The whole floor is stranded. Under the old unscoped formula this read
+        # 0 — a pool holding no pod at all reporting every core as spoken for.
+        assert pool.stranded_cpu_m == 3 * 3600
+        assert pool.stranded_memory_mib == 3 * 6656
+        # No pod fits, so there is no tightest shape to report a density for.
+        assert pool.pods_per_node is None
+
+    def test_excluding_the_oversized_pods_moves_no_node_number(self) -> None:
+        machine = MachineSpec(
+            cpu_m=4000,
+            memory_mib=8192,
+            reserved_cpu_m=400,
+            reserved_memory_mib=1536,
+        )
+        pool_config = NodePool(
+            name="default",
+            machine=machine,
+            min_nodes=1,
+            current_nodes=2,
+            max_nodes=10,
+        )
+        placeable_only = ClusterConfig(
+            workloads={
+                "worker": Workload("worker", Resources(1000, 512), current_replicas=3),
+            },
+            node_pools={"default": pool_config},
+        )
+        with_oversized = ClusterConfig(
+            workloads={
+                "api": Workload("api", Resources(8000, 512), current_replicas=2),
+                "worker": Workload("worker", Resources(1000, 512), current_replicas=3),
+            },
+            node_pools={"default": pool_config},
+        )
+
+        without = evaluate(placeable_only).scenarios["current"].pools["default"]
+        with_ = evaluate(with_oversized).scenarios["current"].pools["default"]
+
+        # Adding pods no node can hold changes what the pool asks for and what
+        # it reports as impossible; it may never change what it is sized to.
+        assert with_.placeable_cpu_m == without.cpu_requested_m
+        assert with_.placeable_memory_mib == without.memory_requested_mib
+        assert with_.nodes_required == without.nodes_required
+        assert with_.effective_nodes_required == without.effective_nodes_required
+        assert with_.nodes_to_add == without.nodes_to_add
+        assert with_.capacity_cpu_m == without.capacity_cpu_m
+        assert with_.capacity_memory_mib == without.capacity_memory_mib
+        assert with_.stranded_cpu_m == without.stranded_cpu_m
+        assert with_.stranded_memory_mib == without.stranded_memory_mib
+
     def test_capacity_and_stranded_capacity_track_the_node_target(self) -> None:
         cluster = cluster_with(
             Workload("api", Resources(2000, 6000), current_replicas=8),

@@ -11,6 +11,7 @@ import { ImportModal } from './components/ImportModal'
 import { RuntimeRisk } from './components/RuntimeRisk'
 import { cloneBaseline, createPool, createWorkload, nextPoolName, nextWorkloadName } from './defaults'
 import { formatCpu, formatMemory, percent } from './format'
+import { describePopulations } from './populations'
 import { SURGE_PERCENT_MAX, SURGE_PODS_MAX, SURGE_UNITS, surgeUnitOf, surgeUnitPatch } from './surge'
 import { withAvg, withPeak } from './usage'
 
@@ -85,24 +86,6 @@ function describeConstraint(scenario?: PoolScenarioResult): { label: string; not
 // rest. Both readings belong on screen — withholding one is the mistake
 // `caAction.ts` describes — so each says which pods it is about, and only while
 // there are two populations to tell apart.
-function describePopulations(
-  oversizedPodCount: number,
-  minNodes: number,
-): { placement: string; effectiveTarget: string; density: string } {
-  if (oversizedPodCount === 0) {
-    return { placement: 'nodes to hold the pods', effectiveTarget: `after CA minimum ${minNodes}`, density: '' }
-  }
-  return {
-    placement: 'nodes for the pods that fit',
-    // The tile sits beside Placement, which has just named the population.
-    effectiveTarget: `same pods, after CA minimum ${minNodes}`,
-    // Appended as its own sentence: the density claim is the only reading in
-    // that section computed over the placeable pods, while the request bars
-    // above it total every pod the pool asks for.
-    density: ` That per-node figure counts only the pods that fit, not the ${oversizedPodCount} requesting more than one whole node.`,
-  }
-}
-
 function Metric({ label, value, note }: { label: string; value: ReactNode; note?: string }) {
   return (
     <div className="metric">
@@ -548,7 +531,11 @@ function ResultsPanel({
 
   const constraint = describeConstraint(poolScenario)
   const oversizedPodCount = poolScenario?.oversized_pod_count ?? 0
-  const populations = describePopulations(oversizedPodCount, activePoolConfig?.min_nodes ?? 0)
+  const populations = describePopulations({
+    oversizedPodCount,
+    minNodes: activePoolConfig?.min_nodes ?? 0,
+    effectiveNodes: poolScenario?.effective_nodes_required ?? 0,
+  })
   const deltaNodes = scenario ? scenario.effective_nodes_required - (baselineScenario?.effective_nodes_required ?? scenario.effective_nodes_required) : 0
   // Cluster totals carry no blocked reason, so it is read off the pools: without
   // that, an idle cluster would total to "Hold" while every pool it sums says
@@ -638,9 +625,9 @@ function ResultsPanel({
           </div>
 
           <section className="result-section">
-            <div className="result-section-heading"><span>Request saturation</span><small>{poolScenario.effective_nodes_required} × node allocatable</small></div>
-            <CapacityBar label="CPU" value={poolScenario.cpu_requested_m} capacity={poolScenario.capacity_cpu_m} stranded={poolScenario.stranded_cpu_m} blocked={!poolScenario.schedulable} display={formatCpu} />
-            <CapacityBar label="Memory" value={poolScenario.memory_requested_mib} capacity={poolScenario.capacity_memory_mib} stranded={poolScenario.stranded_memory_mib} blocked={!poolScenario.schedulable} display={formatMemory} />
+            <div className="result-section-heading"><span>Request saturation</span><small>{populations.saturation}</small></div>
+            <CapacityBar label="CPU" value={poolScenario.placeable_cpu_m} capacity={poolScenario.capacity_cpu_m} stranded={poolScenario.stranded_cpu_m} blocked={!poolScenario.schedulable} display={formatCpu} />
+            <CapacityBar label="Memory" value={poolScenario.placeable_memory_mib} capacity={poolScenario.capacity_memory_mib} stranded={poolScenario.stranded_memory_mib} blocked={!poolScenario.schedulable} display={formatMemory} />
             <BarScale />
             {poolScenario.pods_per_node !== null && (
               <p className="saturation-note">
