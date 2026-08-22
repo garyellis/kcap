@@ -69,3 +69,19 @@ export function describePopulations({
     density: ` That per-node figure counts only the pods that fit, not the ${oversizedPodCount} requesting more than one whole node.`,
   }
 }
+
+/**
+ * The verdict paragraph for a pool blocked by pods no node can hold.
+ *
+ * The fifth string of the same vocabulary — it names the population the density
+ * clause above excludes, in the same words — so it lives beside the other four
+ * rather than inline in the panel, and gets the same test.
+ *
+ * Written out at both counts because the verb and the pronoun agree as well as
+ * the noun: a plural `s` on its own leaves "1 pod request … places them".
+ */
+export function describeOversizedVerdict(oversizedPodCount: number): string {
+  return oversizedPodCount === 1
+    ? '1 pod requests more than one whole node. No node count places it.'
+    : `${oversizedPodCount} pods request more than one whole node. No node count places them.`
+}

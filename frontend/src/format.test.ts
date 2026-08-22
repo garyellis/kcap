@@ -1,5 +1,33 @@
 import { describe, expect, it } from 'vitest'
-import { formatCpu, formatMemory, percent } from './format'
+import { counted, formatCpu, formatMemory, percent, plural } from './format'
+
+describe('plural', () => {
+  it('uses the singular at exactly one and the plural everywhere else', () => {
+    // Zero is plural in English — `0 pods` — and only one is not.
+    expect(plural(0, 'pod')).toBe('pods')
+    expect(plural(1, 'pod')).toBe('pod')
+    expect(plural(2, 'pod')).toBe('pods')
+  })
+
+  it('pluralizes the head of a noun phrase the caller passes whole', () => {
+    // `packed node` is one noun in the Runtime risk chip, adjective included.
+    // It only works because the head noun is last — a phrase that ends in
+    // anything else interpolates around the helper instead.
+    expect(plural(4, 'packed node')).toBe('packed nodes')
+  })
+})
+
+describe('counted', () => {
+  it('prints the count beside a noun that agrees with it', () => {
+    expect(counted(0, 'pod')).toBe('0 pods')
+    expect(counted(1, 'pod')).toBe('1 pod')
+    expect(counted(2, 'pod')).toBe('2 pods')
+  })
+
+  it('reads the noun off the count, not off any formatting of it', () => {
+    expect(counted(4, 'packed node')).toBe('4 packed nodes')
+  })
+})
 
 describe('formatCpu', () => {
   it('keeps millicores below one core, where the raw number is the readable one', () => {
@@ -10,6 +38,13 @@ describe('formatCpu', () => {
     // `2.0 cores` is noise; the tenth only earns its place when it says something.
     expect(formatCpu(2000)).toBe('2 cores')
     expect(formatCpu(2500)).toBe('2.5 cores')
+  })
+
+  it('agrees with the quantity, not with how the quantity was rounded', () => {
+    // 1049m displays as `1.0` but is not one core. The agreement used to be
+    // decided by comparing that formatted string to `'1'`, which made a
+    // display-rounding choice decide a word.
+    expect(formatCpu(1049)).toBe('1.0 cores')
   })
 
   it('switches units at exactly one core, and says "core" there', () => {

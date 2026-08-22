@@ -4,6 +4,7 @@ import { evaluateCluster } from '../api'
 import type { ClusterConfig } from '../api'
 import { buildExportScript, parseImport, planClusterImport, UNPINNED_GROUP } from '../importers'
 import type { ClusterImportPlan, ParsedImport, SelectorGroup } from '../importers'
+import { counted } from '../format'
 import { copyTextToClipboard } from './clipboard'
 import { downloadFile } from './download'
 import { Toggle } from './Fields'
@@ -33,7 +34,7 @@ function GroupRow({
     <div className="import-group">
       <div className="import-group-copy">
         <strong>{describeSelector(group)}</strong>
-        <small>{group.workloads.length} workload{group.workloads.length === 1 ? '' : 's'}</small>
+        <small>{counted(group.workloads.length, 'workload')}</small>
       </div>
       {needsChoice ? (
         <select value="" onChange={(event) => onAssign(group.key, event.target.value)} aria-label={`Pool for ${describeSelector(group)}`}>
@@ -81,7 +82,7 @@ function ClusterPreview({
         {hasNodes && (
           <Toggle
             label="Create node pools from cluster"
-            detail={createPools ? `${Object.keys(plan.derived?.pools ?? {}).length} pool${Object.keys(plan.derived?.pools ?? {}).length === 1 ? '' : 's'} derived` : 'assign to existing pools'}
+            detail={createPools ? `${counted(Object.keys(plan.derived?.pools ?? {}).length, 'pool')} derived` : 'assign to existing pools'}
             checked={createPools}
             onChange={setCreatePools}
           />
@@ -133,7 +134,7 @@ function ScenarioPreview({ current, config }: { current: ClusterConfig; config: 
   return (
     <>
       <div className="note">
-        <strong>Scenario import replaces everything.</strong> The current {Object.keys(current.workloads).length} workload{Object.keys(current.workloads).length === 1 ? '' : 's'} and {Object.keys(current.node_pools).length} pool{Object.keys(current.node_pools).length === 1 ? '' : 's'} are
+        <strong>Scenario import replaces everything.</strong> The current {counted(Object.keys(current.workloads).length, 'workload')} and {counted(Object.keys(current.node_pools).length, 'pool')} are
         swapped for the imported configuration.
       </div>
       <div className="stat-strip stat-strip--4 import-counts">

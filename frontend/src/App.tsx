@@ -10,8 +10,8 @@ import { NumberField, TextField, Toggle } from './components/Fields'
 import { ImportModal } from './components/ImportModal'
 import { RuntimeRisk } from './components/RuntimeRisk'
 import { cloneBaseline, createPool, createWorkload, nextPoolName, nextWorkloadName } from './defaults'
-import { formatCpu, formatMemory, percent } from './format'
-import { describePopulations } from './populations'
+import { counted, formatCpu, formatMemory, percent } from './format'
+import { describeOversizedVerdict, describePopulations } from './populations'
 import { SURGE_PERCENT_MAX, SURGE_PODS_MAX, SURGE_UNITS, surgeUnitOf, surgeUnitPatch } from './surge'
 import { withAvg, withPeak } from './usage'
 
@@ -57,7 +57,7 @@ function describeConstraint(scenario?: PoolScenarioResult): { label: string; not
   if (!scenario) return { label: '—', note: 'dominant pressure', tone: 'neutral' }
 
   const perNode = scenario.pods_per_node
-  const density = perNode === null ? '' : `${perNode} pod${perNode === 1 ? '' : 's'}/node`
+  const density = perNode === null ? '' : `${counted(perNode, 'pod')}/node`
 
   switch (scenario.limiting_resource) {
     case 'pod_too_large':
@@ -144,7 +144,7 @@ function NodeMap({ scenario, maxNodes }: { scenario: PoolScenarioResult; maxNode
   const deficit = scenario.effective_nodes_required - maxNodes
   return (
     <div className="node-map-wrap">
-      <div className="node-map" aria-label={`${scenario.effective_nodes_required} of ${maxNodes} nodes required`}>
+      <div className="node-map" aria-label={`${scenario.effective_nodes_required} of ${counted(maxNodes, 'node')} required`}>
         {Array.from({ length: shown }, (_, index) => {
           const current = index < scenario.current_nodes
           const required = index < scenario.effective_nodes_required
@@ -155,7 +155,7 @@ function NodeMap({ scenario, maxNodes }: { scenario: PoolScenarioResult; maxNode
       </div>
       {deficit > 0 && (
         <div className="callout callout--bad node-deficit">
-          <strong>Deficit.</strong> {deficit} node{deficit === 1 ? '' : 's'} beyond the CA maximum.
+          <strong>Deficit.</strong> {counted(deficit, 'node')} beyond the CA maximum.
         </div>
       )}
     </div>
@@ -202,7 +202,7 @@ function PoolEditor({
             className="danger-button"
             type="button"
             disabled={removeBlocked}
-            title={removeBlocked && poolCount > 1 ? `${assignedWorkloads} workload${assignedWorkloads === 1 ? '' : 's'} still assigned` : undefined}
+            title={removeBlocked && poolCount > 1 ? `${counted(assignedWorkloads, 'workload')} still assigned` : undefined}
             onClick={remove}
           >
             Remove
@@ -456,7 +456,7 @@ function WorkloadEditor({
             </div>
             {result?.clamped_by && (
               <div className="callout callout--warn">
-                <strong>HPA saturated.</strong> Metrics recommend {result.raw_desired_replicas} pods, held at {result.desired_replicas} by the
+                <strong>HPA saturated.</strong> Metrics recommend {counted(result.raw_desired_replicas, 'pod')}, held at {result.desired_replicas} by the
                 {result.clamped_by === 'max' ? ' ceiling' : ' minimum'}. Requests and targets do not move the
                 projection until the recommendation re-enters the {hpa.min_replicas}–{hpa.max_replicas} range.
               </div>
@@ -556,7 +556,7 @@ function ResultsPanel({
     <aside className={`results-panel${stale ? ' is-stale' : ''}`}>
       <header className="results-header">
         <div><span className="eyebrow">{autoRun ? 'Live impact' : 'Simulation'}</span><h2>Capacity projection</h2></div>
-        <span className={`change-chip num${stale ? ' is-stale' : ''}`}>{changeCount} change{changeCount === 1 ? '' : 's'}</span>
+        <span className={`change-chip num${stale ? ' is-stale' : ''}`}>{counted(changeCount, 'change')}</span>
       </header>
 
       <div className="run-bar">
@@ -569,28 +569,34 @@ function ResultsPanel({
       </div>
 
       <nav className="segmented" aria-label="Capacity scenario">
-        {SCENARIOS.map(([key, label]) => (
-          <button key={key} className={scenarioName === key ? 'is-active' : ''} onClick={() => setScenarioName(key)} type="button">
-            <span>{label}</span>
-            <small>{comparison?.candidate_result.scenarios[key]?.pod_count ?? '—'} pods</small>
-          </button>
-        ))}
+        {SCENARIOS.map(([key, label]) => {
+          const pods = comparison?.candidate_result.scenarios[key]?.pod_count
+          return (
+            <button key={key} className={scenarioName === key ? 'is-active' : ''} onClick={() => setScenarioName(key)} type="button">
+              <span>{label}</span>
+              <small>{pods === undefined ? '— pods' : counted(pods, 'pod')}</small>
+            </button>
+          )
+        })}
       </nav>
 
       {multiPool && (
         <>
           <div className="stat-strip stat-strip--3 pool-totals">
-            <div><span>All pools</span><strong className="num">{scenario?.effective_nodes_required ?? '—'} nodes</strong><small>{scenario ? `${scenario.pod_count} pods · ${poolNames.length} pools` : 'summed target'}</small></div>
+            <div><span>All pools</span><strong className="num">{scenario ? counted(scenario.effective_nodes_required, 'node') : '— nodes'}</strong><small>{scenario ? `${counted(scenario.pod_count, 'pod')} · ${counted(poolNames.length, 'pool')}` : 'summed target'}</small></div>
             <div><span>CA action</span><strong className="num">{totalAction}</strong><small>summed across pools</small></div>
             <div><span>Verdict</span><strong>{scenario ? (scenario.schedulable ? 'Clear' : 'Blocked') : '—'}</strong><small>{scenario && !scenario.schedulable ? 'a pool is blocked' : 'every pool fits'}</small></div>
           </div>
           <nav className="segmented segmented--pools" aria-label="Node pool">
-            {poolNames.map((name) => (
-              <button key={name} className={activePool === name ? 'is-active' : ''} onClick={() => setSelectedPool(name)} type="button">
-                <span>{name}</span>
-                <small>{scenario?.pools[name]?.effective_nodes_required ?? '—'} nodes</small>
-              </button>
-            ))}
+            {poolNames.map((name) => {
+              const poolNodes = scenario?.pools[name]?.effective_nodes_required
+              return (
+                <button key={name} className={activePool === name ? 'is-active' : ''} onClick={() => setSelectedPool(name)} type="button">
+                  <span>{name}</span>
+                  <small>{poolNodes === undefined ? '— nodes' : counted(poolNodes, 'node')}</small>
+                </button>
+              )
+            })}
           </nav>
         </>
       )}
@@ -604,7 +610,7 @@ function ResultsPanel({
               <p>{poolScenario.schedulable
                 ? 'All pods fit within the autoscaler envelope.'
                 : oversizedPodCount > 0
-                  ? `${oversizedPodCount} pod${oversizedPodCount === 1 ? '' : 's'} request more than one whole node. No node count places them.`
+                  ? describeOversizedVerdict(oversizedPodCount)
                   : 'A placement constraint exceeds the configured envelope.'}</p>
             </div>
             {/* A labelled group, so the reading (`−3`, `nodes`) has a boundary a
@@ -631,6 +637,11 @@ function ResultsPanel({
             <BarScale />
             {poolScenario.pods_per_node !== null && (
               <p className="saturation-note">
+                {/* The count agrees here by carrying a whole second sentence — the verb
+                    moves too ("fits"/"fit"), which no noun helper supplies. It stays inline
+                    rather than joining `populations.ts`: that module names which pod
+                    *population* a reading is about, which is the clause appended at the end,
+                    not this one. */}
                 Provisioned capacity, not the live pool. {poolScenario.pods_per_node === 1
                   ? 'Only one pod fits per node'
                   : `${poolScenario.pods_per_node} pods fit per node`} at this shape, so the remainder cannot be
@@ -662,9 +673,9 @@ function ResultsPanel({
           <RuntimeRisk pool={poolScenario} workloads={candidate.workloads} replicas={scenario.replicas} />
 
           <section className="delta-strip">
-            <div><span>Baseline</span><strong>{baselineScenario?.effective_nodes_required ?? '—'} nodes</strong></div>
+            <div><span>Baseline</span><strong>{baselineScenario === undefined ? '— nodes' : counted(baselineScenario.effective_nodes_required, 'node')}</strong></div>
             <div className="delta-line"><i /><b>{deltaNodes >= 0 ? '+' : ''}{deltaNodes}</b><i /></div>
-            <div><span>Candidate</span><strong>{scenario.effective_nodes_required} nodes</strong></div>
+            <div><span>Candidate</span><strong>{counted(scenario.effective_nodes_required, 'node')}</strong></div>
             <p className="delta-note">CA action compares this target against the {scenario.current_nodes}-node live pool; this strip compares it against the locked baseline.</p>
           </section>
         </div>
@@ -921,7 +932,7 @@ function App() {
           <HelmMark />
           <div className="brand-copy"><h1>KCAP</h1><p>Capacity planner</p></div>
         </div>
-        <div className="topbar-center"><strong>{poolNames.length === 1 ? poolNames[0] : `${poolNames.length} node pools`}</strong> · {Object.keys(candidate.workloads).length} workloads</div>
+        <div className="topbar-center"><strong>{poolNames.length === 1 ? poolNames[0] : `${poolNames.length} node pools`}</strong> · {counted(Object.keys(candidate.workloads).length, 'workload')}</div>
         <div className="topbar-meta">
           <button className="topbar-button" type="button" onClick={() => setModal('export')}>Export</button>
           <button className="topbar-button" type="button" onClick={() => setModal('import')}>Import</button>
@@ -949,7 +960,7 @@ function App() {
                   onClick={() => setSelection({ kind: 'pool', name })}
                 >
                   <strong>{name}</strong>
-                  <small>{pool.current_nodes} nodes · {formatCpu(pool.machine.cpu_m)} · {formatMemory(pool.machine.memory_mib)}</small>
+                  <small>{counted(pool.current_nodes, 'node')} · {formatCpu(pool.machine.cpu_m)} · {formatMemory(pool.machine.memory_mib)}</small>
                 </button>
               ))}
             </div>
@@ -960,7 +971,7 @@ function App() {
               {Object.entries(candidate.workloads).map(([name, workload]) => (
                 <button className={`catalog-item ${selection.kind === 'workload' && selection.name === name ? 'is-active' : ''}`} type="button" key={name} onClick={() => setSelection({ kind: 'workload', name })}>
                   <strong>{name}</strong>
-                  <small>{workload.current_replicas} pods · {formatCpu(workload.resources.cpu_request_m)} · {formatMemory(workload.resources.memory_request_mib)}{poolNames.length > 1 && workload.pool ? ` · ${workload.pool}` : ''}</small>
+                  <small>{counted(workload.current_replicas, 'pod')} · {formatCpu(workload.resources.cpu_request_m)} · {formatMemory(workload.resources.memory_request_mib)}{poolNames.length > 1 && workload.pool ? ` · ${workload.pool}` : ''}</small>
                 </button>
               ))}
             </div>

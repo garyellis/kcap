@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 
-import { describePopulations } from './populations'
+import { describeOversizedVerdict, describePopulations } from './populations'
 
 describe('describePopulations', () => {
   it('gives an ordinary pool no scoping words at all', () => {
@@ -54,5 +54,28 @@ describe('describePopulations', () => {
 
     expect(notes.placement).toBe('nodes for the pods that fit')
     expect(notes.saturation).toBe('the pods that fit · 3 × node allocatable')
+  })
+})
+
+// The verdict names the population the density clause above it excludes, so it
+// belongs to the same vocabulary. At one pod the verb and the pronoun have to
+// agree as well as the noun.
+describe('describeOversizedVerdict', () => {
+  it('reads as a sentence at a single oversized pod', () => {
+    expect(describeOversizedVerdict(1)).toBe(
+      '1 pod requests more than one whole node. No node count places it.',
+    )
+  })
+
+  it('reads as a sentence at more than one', () => {
+    expect(describeOversizedVerdict(4)).toBe(
+      '4 pods request more than one whole node. No node count places them.',
+    )
+  })
+
+  it('names the oversized pods in the same words the density clause does', () => {
+    const density = describePopulations({ oversizedPodCount: 4, minNodes: 1, effectiveNodes: 2 }).density
+    expect(describeOversizedVerdict(4)).toContain('more than one whole node')
+    expect(density).toContain('more than one whole node')
   })
 })

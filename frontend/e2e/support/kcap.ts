@@ -28,6 +28,11 @@ import type { Traffic } from './traffic'
  *    carries its unit and hint. Matching on a `^prefix` keeps a locator from
  *    breaking every time the number beside the label moves — which, in a capacity
  *    simulator, is constantly.
+ *
+ * 5. **Counts agree with their nouns**, so every locator that matches a count
+ *    matches the singular too: `pods?`, `nodes?`, `changes?`. One that knows
+ *    only the plural fails as "element not found" the day a fixture reaches
+ *    one, which reads as an unrelated breakage rather than a wrong value.
  */
 export class Kcap {
   readonly page: Page
@@ -83,13 +88,13 @@ export class Kcap {
     await this.workload(name).click()
     // The editor heading is how an operator confirms which workload they are on.
     await expect(this.page.getByRole('heading', { level: 2, name })).toBeVisible()
-    await this.editorCaughtUp(this.workload(name), /(\d+) pods/, 'Current replicas')
+    await this.editorCaughtUp(this.workload(name), /(\d+) pods?/, 'Current replicas')
   }
 
   async selectNodePool(name: string): Promise<void> {
     await this.nodePool(name).click()
     await expect(this.page.getByRole('heading', { level: 2, name })).toBeVisible()
-    await this.editorCaughtUp(this.nodePool(name), /(\d+) nodes/, 'Current nodes')
+    await this.editorCaughtUp(this.nodePool(name), /(\d+) nodes?/, 'Current nodes')
   }
 
   /**
@@ -121,7 +126,7 @@ export class Kcap {
   async configurationSummary(): Promise<string> {
     // Anchored at the end so the match is the summary line itself rather than
     // the whole header, which carries the buttons and the connection pill too.
-    return (await this.page.getByText(/ · \d+ workloads$/).innerText()).trim()
+    return (await this.page.getByText(/ · \d+ workloads?$/).innerText()).trim()
   }
 
   // --- the workload editor --------------------------------------------------
@@ -176,13 +181,13 @@ export class Kcap {
 
   /** The pod count printed inside a scenario tab, as the operator reads it. */
   async podCount(label: string): Promise<number> {
-    const reading = await this.scenarioTab(label).getByText(/^\d+ pods$/).innerText()
+    const reading = await this.scenarioTab(label).getByText(/^\d+ pods?$/).innerText()
     return Number.parseInt(reading, 10)
   }
 
   /**
    * The CA-action tile beside the verdict, read as one line: `−3 nodes`,
-   * `+2 nodes`, `Hold steady`, `None no fix`, `None no demand`.
+   * `+2 nodes`, `+1 node`, `Hold steady`, `None no fix`, `None no demand`.
    * (The minus is U+2212, not a hyphen — that is what the tile prints.)
    */
   async caAction(): Promise<string> {

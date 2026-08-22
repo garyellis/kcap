@@ -2,7 +2,7 @@ import { useId, useMemo } from 'react'
 import type { ClusterConfig, PoolScenarioResult } from '../api'
 import { contentionReadout } from '../contention'
 import { exposureReadout } from '../exposure'
-import { formatCpu, formatMemory } from '../format'
+import { counted, formatCpu, formatMemory } from '../format'
 
 // The results panel's runtime-risk readout for the selected pool and scenario.
 //
@@ -65,8 +65,8 @@ export function RuntimeRisk({
           {contention.kind === 'borrowed-cpu' && (
             <details className="risk-detail">
               <summary>
-                <span className="chip chip--warn">Borrowed CPU · {contention.workloadCount} workload{contention.workloadCount === 1 ? '' : 's'}</span>
-                <small>{contention.contendedNodeCount} of {contention.nodesEvaluated} packed node{contention.nodesEvaluated === 1 ? '' : 's'} contended</small>
+                <span className="chip chip--warn">Borrowed CPU · {counted(contention.workloadCount, 'workload')}</span>
+                <small>{contention.contendedNodeCount} of {counted(contention.nodesEvaluated, 'packed node')} contended</small>
               </summary>
               <div className="risk-table-scroll">
                 {/* The engine composes one sentence per flag so that every API
@@ -125,8 +125,8 @@ export function RuntimeRisk({
                     that node at exactly its allocatable, so there the finding is
                     about the pods and the chip says so rather than reading "0 of 4". */}
                 <span className="chip chip--warn">{exposure.exhaustibleNodeCount > 0
-                  ? `Node exhaustible · ${exposure.exhaustibleNodeCount} of ${exposure.nodesEvaluated} node${exposure.nodesEvaluated === 1 ? '' : 's'}`
-                  : `Unlimited memory · ${exposure.unlimitedPodCount} pod${exposure.unlimitedPodCount === 1 ? '' : 's'}`}</span>
+                  ? `Node exhaustible · ${exposure.exhaustibleNodeCount} of ${counted(exposure.nodesEvaluated, 'node')}`
+                  : `Unlimited memory · ${counted(exposure.unlimitedPodCount, 'pod')}`}</span>
                 {/* "Most exposed", not "fullest": this is the highest-ceiling node,
                     which is routinely not the one carrying the most requests. And the
                     CPU line below reports its own maximum, so the two can legitimately

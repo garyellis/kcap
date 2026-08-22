@@ -15,6 +15,13 @@ describe('caAction', () => {
     expect(caAction(input({ nodesToRemove: 2 }))).toEqual({ label: '−2', className: 'is-remove', note: 'nodes' })
   })
 
+  // The label and the note are separate elements, read as one line: a pool one
+  // node short of its target read `+1 nodes` until the note agreed with it.
+  it('names one node in the singular, on both directions', () => {
+    expect(caAction(input({ nodesToAdd: 1 }))).toEqual({ label: '+1', className: 'is-add', note: 'node' })
+    expect(caAction(input({ nodesToRemove: 1 }))).toEqual({ label: '−1', className: 'is-remove', note: 'node' })
+  })
+
   it('holds when the pool is already the right size', () => {
     expect(caAction(input())).toEqual({ label: 'Hold', className: 'is-hold', note: 'steady' })
   })

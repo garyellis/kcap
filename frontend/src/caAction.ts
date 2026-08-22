@@ -1,4 +1,5 @@
 import type { PoolScenarioResult } from './api'
+import { plural } from './format'
 
 // The Cluster Autoscaler action the results panel reads out: what the engine's
 // node arithmetic instructs, in one place. Two call sites share it — the
@@ -40,13 +41,15 @@ export interface CaAction {
   /** `+N`, `−N` (U+2212), `None`, or `Hold`. */
   label: string
   className: 'is-add' | 'is-remove' | 'is-hold'
-  note: 'nodes' | 'steady' | 'no fix' | 'no demand'
+  note: 'node' | 'nodes' | 'steady' | 'no fix' | 'no demand'
 }
 
 /** The rendered CA action for one pool's — or the cluster's — node deltas. */
 export function caAction({ nodesToAdd, nodesToRemove, blockedReason }: CaActionInput): CaAction {
-  if (nodesToAdd > 0) return { label: `+${nodesToAdd}`, className: 'is-add', note: 'nodes' }
-  if (nodesToRemove > 0) return { label: `−${nodesToRemove}`, className: 'is-remove', note: 'nodes' }
+  // The label carries the count and the note carries the noun, so the noun
+  // agrees with a number printed in the element next to it.
+  if (nodesToAdd > 0) return { label: `+${nodesToAdd}`, className: 'is-add', note: plural(nodesToAdd, 'node') }
+  if (nodesToRemove > 0) return { label: `−${nodesToRemove}`, className: 'is-remove', note: plural(nodesToRemove, 'node') }
   if (blockedReason !== null) {
     return {
       label: 'None',
