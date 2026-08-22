@@ -24,9 +24,9 @@ made — it is not a discovery tool, and it does not retire the manual walk.
 
 Every row carries exactly one status. Nineteen are **Automated**, naming their spec file and
 keeping a separate **Last walked manually** date that CI never touches. Six are **manual
-only**, each saying why automating it would be worse than not. Three are **not yet
-promoted** — R26, R27, and R28 each carry an expectation written the session that shipped the
-behavior, and wait a session for it to settle.
+only**, each saying why automating it would be worse than not. Four are **not yet
+promoted** — R26, R27, R28, and R29 each carry an expectation written the session that shipped
+the behavior, and wait a session for it to settle.
 
 An automated row may still name a part of itself the suite deliberately leaves alone; R24 is
 the standing example. That is a note inside the row, not a fourth status.
@@ -344,12 +344,14 @@ already right-sized. Never `None`.
 **Steps:** select `api`, set **CPU request** above one node's allocatable (e.g. `8000` on the
 default 4-core node).
 **Expect:** verdict reads `Capacity blocked` with `N pods request more than one whole node. No
-node count places them.`; CA action reads `None · no fix`; the constraint chip reads
+node count places them.`, followed by the sentence naming what those pods asked for, which is
+R29's subject; CA action reads `None · no fix`; the constraint chip reads
 `POD SIZE`. At exactly one oversized pod the whole sentence agrees — `1 pod requests more than
 one whole node. No node count places it.` — verb and pronoun included; R26 covers that reading.
 **Origin:** P0.3 (Session C) · **Manual only:** see the group note above. · **Last verified:**
-2026-08-22 (Session N, re-walked at 3 and at 1 oversized pod — `Capacity blocked`,
-`None · no fix`, `POD SIZE` at both, and the sentence agrees at one)
+2026-08-22 (Session Q, re-walked at 6 and at 1 oversized pod after the verdict gained R29's
+sentence — `Capacity blocked`, `None · no fix`, `POD SIZE` at both, and the sentence agrees at
+one. Previously walked 2026-08-22, Session N, at 3 and at 1 oversized pod)
 
 ### R8 — A partly-oversized pool still reports its genuine addition
 **Pins:** the P0.3 follow-up — the panel used to suppress `+N` whenever any pod was oversized,
@@ -371,8 +373,9 @@ this one deliberately left alone.
 **Steps:** select `api`, set **CPU request** to `8000` (above the default 4-core node's
 allocatable) and press Enter. Let the **CPU limit** follow the request up — the API rejects a
 limit below it, and typing the limit back down 422s the run.
-**Expect:** the verdict still reads `6 pods request more than one whole node. No node count
-places them.`, and beside it `Placement 1` now reads `nodes for the pods that fit` while
+**Expect:** the verdict still opens `6 pods request more than one whole node. No node count
+places them.` — it continues with the excluded demand R29 pins, which this row leaves alone —
+and beside it `Placement 1` now reads `nodes for the pods that fit` while
 `Effective target 3` reads `same pods, after CA minimum 3`. The paragraph under the saturation
 bars keeps its own sentence and gains a second one: `That per-node figure counts only the pods
 that fit, not the 6 requesting more than one whole node.` Press **Reset** and re-read: with no
@@ -387,11 +390,13 @@ read off the screen: two readings of one population that disagreed would be wors
 The tile numbers themselves are matched as `\d+`, because the claim is which pods each number is
 about. Reading a tile as one line needed the four metric tiles to become `role="group"` named
 from the label already on screen — an ARIA fix, walked as the UI change it is ·
-**Last walked manually:** 2026-08-22 (Session O, re-walked at 6 oversized pods after the tiles
-gained their group role — verdict, `Placement 1 · nodes for the pods that fit`,
-`Effective target 3 · same pods, after CA minimum 3`, and the density sentence all unchanged.
-Previously walked 2026-08-21, Session M, at 6 oversized pods and with every pod oversized while
-settling C4; and 2026-08-21, Session J, which also covered the single-oversized-pod wording
+**Last walked manually:** 2026-08-22 (Session Q, re-walked at 6 oversized pods and back through
+**Reset** after the verdict gained R29's sentence — `Placement 1 · nodes for the pods that fit`,
+`Effective target 3 · same pods, after CA minimum 3`, the density sentence, and the unscoped
+notes after **Reset** all unchanged. Previously walked 2026-08-22, Session O, after the tiles
+gained their group role; and 2026-08-21, Session M, at 6 oversized pods and with every pod
+oversized while settling C4; and 2026-08-21, Session J, which also covered the
+single-oversized-pod wording
 `not the 1 requesting more than one whole node`)
 
 ### R25 — The request bars are about the pods their capacity was sized for
@@ -400,7 +405,8 @@ divide by capacity sized from the pods that fit, so both numerators are now abou
 too, and the section's subhead names them. The stranded readout beside the bar is measured
 against the same capacity and is scoped with it — a scoped bar next to an unscoped stranded
 figure would contradict itself one line lower. The excluded demand is still on screen: the
-verdict above counts it, which is the mistake R8 pins. It lives in this group rather than with
+verdict above counts it and, since R29, sizes it — dropping it is the mistake R8 pins. It lives
+in this group rather than with
 the bars because it is the same two-population question R22 and R8 are about. The trap is the
 ordinary pool — nothing may change there, because there is only one population to be about.
 **Steps:** (a) select `api`, set **CPU request** to `8000` (above the default 4-core node's
@@ -415,8 +421,9 @@ follow rather than typing it back down, or the run 422s and the panel goes stale
   the **Memory** bar reads `3 GiB / 43.5 GiB` with `7% requested · 93% (40.5 GiB) stranded`.
   Neither ratio is above 100%, and both bars moved the same way — the memory one was never over
   100%, so it is the one that proves this is a scoping change and not a clamp. Nothing R22 pins
-  moves: the verdict still reads `6 pods request more than one whole node. No node count places
-  them.`, `Placement 1`, `Effective target 3`, `Headroom 17`, `CA action None · no fix`, and the
+  moves: the verdict still opens `6 pods request more than one whole node. No node count places
+  them.` (R29 reads the sentence that follows it), `Placement 1`, `Effective target 3`,
+  `Headroom 17`, `CA action None · no fix`, and the
   density paragraph still ends `…not the 6 requesting more than one whole node.`
 - (b) with nothing placeable the subhead still scopes — `the pods that fit · 3 × node
   allocatable` — and both bars read `0m / 10.8 cores` and `0 MiB / 43.5 GiB`, `0% requested ·
@@ -440,11 +447,51 @@ requested and stranded shares must account for its own capacity between them. Th
 what catches scoping one bar and not the other — an unscoped memory numerator reads `21%
 requested` beside `93% stranded`, which is 14 points of a population that is not there. Reading
 a bar as one line needed the same `role="group"` fix the metric tiles took ·
-**Last walked manually:** 2026-08-22 (Session O, all three reads walked again after the bars
-gained their group role — `2 cores / 10.8 cores` at `19% · 81%` and `3 GiB / 43.5 GiB` at
+**Last walked manually:** 2026-08-22 (Session Q, all three reads walked again after the verdict
+above gained R29's sentence — `2 cores / 10.8 cores` at `19% · 81%` and `3 GiB / 43.5 GiB` at
 `7% · 93%` scoped, `0m` / `0 MiB` at `0% · 100%` with nothing placeable, and the shipped
-`74% · 26%` / `25% · 75%` back after **Reset**. Previously walked 2026-08-21, Session M, on the
-fixed build, where the reset figures were read off the pre-edit screen first)
+`74% · 26%` / `25% · 75%` back after **Reset**, the reset figures read against the ones captured
+before the edit. Previously walked 2026-08-22, Session O, after the bars gained their group role;
+and 2026-08-21, Session M, on the fixed build)
+
+### R29 — The pods no node can hold say how much they wanted
+**Pins:** what R25 took off the screen along with the defect. Before R25 the bars totalled every
+pod against capacity sized for only some of them, and the over-100% reading — `463% requested` at
+its worst — was wrong, but it was also the only thing on screen saying *some demand was left
+out*. Scoping the bars fixed the first and removed the second: an operator reading `74%` had no
+way to tell whether the excluded pods wanted a rounding error or ten more nodes' worth. The
+verdict paragraph now says the size as well as the count, in the same place, so the excluded
+demand belongs to the pods it is about and to no capacity at all — nothing invites adding it back
+into a bar. No number anywhere else moves; this row is only about the sentence.
+**Steps:** (a) select `api`, set **CPU request** to `8000` (above the default 4-core node's
+allocatable) and press Enter, letting the **CPU limit** follow the request up. Read the verdict
+paragraph. (b) also set `worker`'s **CPU request** to `8000`, so nothing in the pool is placeable.
+(c) press **Reset**, then select the `Current` scenario tab, set `api`'s **Current replicas** to
+`1`, and set its **CPU request** to `8000` again — one oversized pod, where the sentence has to
+read as English. (d) press **Reset** and read the panel with nothing oversized.
+**Expect:**
+- (a) `6 pods request more than one whole node. No node count places them. Their 48 cores of CPU
+  and 6 GiB of memory are left out of the node sizing below.` The demand named is the excluded
+  pods' own, not the pool's total. Everything R22 and R25 pin is untouched: `Placement 1`,
+  `Effective target 3`, `Headroom 17`, `CA action None · no fix`, `Pod size`, and both bars still
+  under 100% at `19% · 81%` and `7% · 93%`.
+- (b) `8 pods request more than one whole node. No node count places them. Their 64 cores of CPU
+  and 7.5 GiB of memory are left out of the node sizing below.` — with nothing placeable the
+  sentence accounts for the whole pool's demand, beside bars reading `0m` and `0 MiB`.
+- (c) `1 pod requests more than one whole node. No node count places it. Its 8 cores of CPU and
+  1 GiB of memory are left out of the node sizing below.` — noun, verb, and both pronouns agree,
+  the reading R26 is about carried into the new sentence.
+- (d) the verdict reads `Capacity clear` / `All pods fit within the autoscaler envelope.` and
+  nothing anywhere says anything about excluded demand — no `0m`, no empty row. A pool with one
+  population gains no words, on the same rule as R22.
+
+Read both amounts as an operator would: `48 cores`, not `48000m`, and a count that agrees with
+the noun beside it. No console errors, and no 422 in any of the four.
+**Origin:** the reporting gap C4 left behind (Session Q) · **Not yet promoted:** the wording is
+one session old; it settles before `frontend/e2e/oversized-pool.spec.ts` freezes it, and R22 and
+R25 already hold the readings around it still. · **Last verified:** 2026-08-22 (Session Q, all
+four walked on the shipped defaults, plus the same sentence on a partly-oversized pool sitting
+beside an untouched ordinary pool in a two-pool configuration)
 
 ### R26 — Every count agrees with the noun beside it at one
 **Pins:** nine readouts printed a count against a hardcoded plural, so a one-replica workload
@@ -913,6 +960,9 @@ The engine already knew the scoped totals but only as locals inside its pool eva
 fix is an engine, schema, and contract change as well as a UI one: `placeable_cpu_m` and
 `placeable_memory_mib` are now fields on the pool result. Re-deriving them in the frontend would
 have put the packer's fit test in the panel. No node number moved. Promoted to **R25** above.
+What this resolution left behind: the verdict counted the excluded pods but never said how much
+they wanted, so the `463%` bar had been the only reading of that magnitude. The verdict now
+carries it — see **R29** above.
 Original observation kept for the record:
 
 **Observed:** 2026-08-21 (Session J, while settling C1). In C1's own state — `api` at an 8000m

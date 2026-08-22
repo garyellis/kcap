@@ -343,8 +343,12 @@ export class Kcap {
 
   /**
    * The verdict paragraph a pool blocked by pods no node can hold prints:
-   * `6 pods request more than one whole node. No node count places them.`
-   * Absent on any other pool, so its count is itself a reading.
+   * `6 pods request more than one whole node. No node count places them. Their
+   * 48 cores of CPU and 6 GiB of memory are left out of the node sizing below.`
+   * Absent on any other pool, so its count is itself a reading. The match is
+   * anchored at the opening count and left open at the end, so the sentence
+   * naming the excluded demand may grow or reword without unhooking the
+   * scenarios that only read the count.
    */
   get oversizedVerdict(): Locator {
     // Anchored at the count: the density paragraph names the same population in

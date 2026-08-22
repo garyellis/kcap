@@ -61,21 +61,78 @@ describe('describePopulations', () => {
 // belongs to the same vocabulary. At one pod the verb and the pronoun have to
 // agree as well as the noun.
 describe('describeOversizedVerdict', () => {
+  /** A pool whose oversized pods want 8 cores and 16 GiB of the demand on top. */
+  function verdict(oversizedPodCount: number): string {
+    return describeOversizedVerdict({
+      oversizedPodCount,
+      cpuRequestedM: 12_000,
+      memoryRequestedMib: 24_576,
+      placeableCpuM: 4_000,
+      placeableMemoryMib: 8_192,
+    })
+  }
+
   it('reads as a sentence at a single oversized pod', () => {
-    expect(describeOversizedVerdict(1)).toBe(
-      '1 pod requests more than one whole node. No node count places it.',
+    expect(verdict(1)).toBe(
+      '1 pod requests more than one whole node. No node count places it.'
+      + ' Its 8 cores of CPU and 16 GiB of memory are left out of the node sizing below.',
     )
   })
 
   it('reads as a sentence at more than one', () => {
-    expect(describeOversizedVerdict(4)).toBe(
-      '4 pods request more than one whole node. No node count places them.',
+    expect(verdict(4)).toBe(
+      '4 pods request more than one whole node. No node count places them.'
+      + ' Their 8 cores of CPU and 16 GiB of memory are left out of the node sizing below.',
     )
   })
 
   it('names the oversized pods in the same words the density clause does', () => {
     const density = describePopulations({ oversizedPodCount: 4, minNodes: 1, effectiveNodes: 2 }).density
-    expect(describeOversizedVerdict(4)).toContain('more than one whole node')
+    expect(verdict(4)).toContain('more than one whole node')
     expect(density).toContain('more than one whole node')
+  })
+
+  // The magnitude is the whole point of the sentence: the bars above are scoped
+  // to the pods that fit, so without this an operator reading 74% cannot tell
+  // whether the excluded pods wanted a rounding error or ten more nodes' worth.
+  it('reports the excluded demand as the gap between the declared and the placeable', () => {
+    expect(
+      describeOversizedVerdict({
+        oversizedPodCount: 2,
+        cpuRequestedM: 9_500,
+        memoryRequestedMib: 5_000,
+        placeableCpuM: 500,
+        placeableMemoryMib: 4_000,
+      }),
+    ).toContain('Their 9 cores of CPU and 1000 MiB of memory')
+  })
+
+  // A pod is oversized on whichever resource no node can hold, so the other one
+  // can be tiny. It is still named: an unreported resource and a zero one look
+  // the same on screen.
+  it('names both resources even when the excluded pods barely asked for one', () => {
+    expect(
+      describeOversizedVerdict({
+        oversizedPodCount: 1,
+        cpuRequestedM: 750,
+        memoryRequestedMib: 400_000,
+        placeableCpuM: 500,
+        placeableMemoryMib: 1_000,
+      }),
+    ).toContain('Its 250m of CPU and 389.6 GiB of memory')
+  })
+
+  // Nothing placeable at all: the excluded demand is the pool's whole demand,
+  // and the sentence must still subtract rather than assume a remainder.
+  it('reports the whole demand when no pod in the pool can be placed', () => {
+    expect(
+      describeOversizedVerdict({
+        oversizedPodCount: 3,
+        cpuRequestedM: 24_000,
+        memoryRequestedMib: 49_152,
+        placeableCpuM: 0,
+        placeableMemoryMib: 0,
+      }),
+    ).toContain('Their 24 cores of CPU and 48 GiB of memory')
   })
 })

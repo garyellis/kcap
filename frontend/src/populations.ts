@@ -10,11 +10,16 @@
 // there are two populations to tell apart. A pool with nothing oversized gets
 // no extra words, because there is nothing to distinguish: the qualifier would
 // be noise on the common case and would train a reader to ignore it on the
-// case that matters.
+// case that matters. The one reading about the *other* population — the verdict
+// paragraph — says how many those pods are and how much they asked for, so the
+// demand the scoped readings leave out is stated somewhere rather than implied
+// by its absence.
 //
 // This lives outside the panel because it is four coordinated strings driving
 // four readouts that have to agree with each other, which is exactly the shape
 // that has gone wrong before by drifting apart inline.
+
+import { counted, formatCpu, formatMemory } from './format'
 
 export interface PopulationInput {
   /** Pods too large for an empty node; 0 means one population and no scoping. */
@@ -70,6 +75,20 @@ export function describePopulations({
   }
 }
 
+export interface OversizedVerdictInput {
+  /**
+   * Pods too large for an empty node. The caller renders this verdict only
+   * above 0 — with one population there is no excluded demand to report.
+   */
+  oversizedPodCount: number
+  /** The pool's whole declared demand, oversized pods included. */
+  cpuRequestedM: number
+  memoryRequestedMib: number
+  /** The part of that demand the packer could place: what the node count was sized from. */
+  placeableCpuM: number
+  placeableMemoryMib: number
+}
+
 /**
  * The verdict paragraph for a pool blocked by pods no node can hold.
  *
@@ -77,11 +96,35 @@ export function describePopulations({
  * clause above excludes, in the same words — so it lives beside the other four
  * rather than inline in the panel, and gets the same test.
  *
+ * It is also the only place the panel says how *much* those pods wanted. Every
+ * other reading is scoped to the pods that fit, deliberately: a saturation bar
+ * that totalled both populations against capacity sized for one read past 100%,
+ * which is the defect that scoping fixed. So the magnitude is reported here, as
+ * a sentence, where it is attached to the population it belongs to and to no
+ * capacity at all — nothing on screen invites the reader to add it back into a
+ * ratio.
+ *
  * Written out at both counts because the verb and the pronoun agree as well as
  * the noun: a plural `s` on its own leaves "1 pod request … places them".
  */
-export function describeOversizedVerdict(oversizedPodCount: number): string {
+export function describeOversizedVerdict({
+  oversizedPodCount,
+  cpuRequestedM,
+  memoryRequestedMib,
+  placeableCpuM,
+  placeableMemoryMib,
+}: OversizedVerdictInput): string {
+  // The gap between the two totals is the oversized pods' own demand. The
+  // engine reports both because it sized the node count from the second, so
+  // this subtraction reads its answer rather than re-running its fit test.
+  //
+  // Both resources are always named, including a resource the excluded pods
+  // barely asked for: a pod is oversized on whichever one no node can hold, and
+  // printing only that one would leave a reader guessing whether the other was
+  // zero or merely unreported.
+  const excluded = `${formatCpu(cpuRequestedM - placeableCpuM)} of CPU and ${formatMemory(memoryRequestedMib - placeableMemoryMib)} of memory`
+
   return oversizedPodCount === 1
-    ? '1 pod requests more than one whole node. No node count places it.'
-    : `${oversizedPodCount} pods request more than one whole node. No node count places them.`
+    ? `${counted(1, 'pod')} requests more than one whole node. No node count places it. Its ${excluded} are left out of the node sizing below.`
+    : `${counted(oversizedPodCount, 'pod')} request more than one whole node. No node count places them. Their ${excluded} are left out of the node sizing below.`
 }

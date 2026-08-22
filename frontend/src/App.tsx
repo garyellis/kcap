@@ -547,6 +547,19 @@ function ResultsPanel({
     minNodes: activePoolConfig?.min_nodes ?? 0,
     effectiveNodes: poolScenario?.effective_nodes_required ?? 0,
   })
+  // The panel's one reading about the pods no node can hold: how many they are
+  // and how much demand they take out of the sizing every other reading here is
+  // scoped to. Null while the pool holds a single population, which is also the
+  // only state where this paragraph would have nothing to report.
+  const oversizedVerdict = poolScenario && poolScenario.oversized_pod_count > 0
+    ? describeOversizedVerdict({
+        oversizedPodCount: poolScenario.oversized_pod_count,
+        cpuRequestedM: poolScenario.cpu_requested_m,
+        memoryRequestedMib: poolScenario.memory_requested_mib,
+        placeableCpuM: poolScenario.placeable_cpu_m,
+        placeableMemoryMib: poolScenario.placeable_memory_mib,
+      })
+    : null
   const deltaNodes = scenario ? scenario.effective_nodes_required - (baselineScenario?.effective_nodes_required ?? scenario.effective_nodes_required) : 0
   // Cluster totals carry no blocked reason, so it is read off the pools: without
   // that, an idle cluster would total to "Hold" while every pool it sums says
@@ -629,9 +642,7 @@ function ResultsPanel({
               <strong><i className="verdict-dot" />{poolScenario.schedulable ? 'Capacity clear' : 'Capacity blocked'}</strong>
               <p>{poolScenario.schedulable
                 ? 'All pods fit within the autoscaler envelope.'
-                : oversizedPodCount > 0
-                  ? describeOversizedVerdict(oversizedPodCount)
-                  : 'A placement constraint exceeds the configured envelope.'}</p>
+                : (oversizedVerdict ?? 'A placement constraint exceeds the configured envelope.')}</p>
             </div>
             {/* A labelled group, so the reading (`−3`, `nodes`) has a boundary a
                 screen reader announces on entry instead of three loose strings after
