@@ -5,6 +5,7 @@ import { compareClusters } from './api'
 import type { ClusterConfig, CompareResponse, NodePool, PoolScenarioResult, UsageStat, Workload, WorkloadResult } from './api'
 import { withPodEdit } from './breakdown'
 import { caAction } from './caAction'
+import { contentionReadout } from './contention'
 import { ExportModal } from './components/ExportModal'
 import { NumberField, TextField, Toggle } from './components/Fields'
 import { ImportModal } from './components/ImportModal'
@@ -515,6 +516,13 @@ function ResultsPanel({
   const poolScenario = scenario ? scenario.pools[activePool] ?? Object.values(scenario.pools)[0] : undefined
   const activePoolConfig = candidate.node_pools[poolScenario?.pool ?? activePool] ?? candidate.node_pools[activePool]
 
+  // Contention is additive context, never a verdict: nothing below reads it
+  // except the Runtime risk section. `null` is "no nodes were packed", not
+  // "all clear" — see `contention.ts`. A missing `poolScenario` is not a third
+  // meaning: it happens only before the first result arrives, and the section
+  // it feeds does not render until one has.
+  const contention = contentionReadout(poolScenario?.cpu_contention ?? null)
+
   const limits = useMemo(() => {
     if (!scenario) return null
     let cpu = 0
@@ -669,10 +677,74 @@ function ResultsPanel({
             </div>
           </section>
 
-          <section className="limit-summary">
-            <div><span>CPU runtime limit</span><strong className={limits?.cpuUnbounded ? 'is-unbounded' : 'num'}>{limits?.cpuUnbounded ? 'Unbounded' : formatCpu(limits?.cpu ?? 0)}</strong></div>
-            <div><span>Memory runtime limit</span><strong className={limits?.memoryUnbounded ? 'is-unbounded' : 'num'}>{limits?.memoryUnbounded ? 'Unbounded' : formatMemory(limits?.memory ?? 0)}</strong></div>
-            <p>Limits are reported for runtime risk; requests alone drive placement.</p>
+          <section className="runtime-risk">
+            <div className="result-section-heading"><span>Runtime risk</span></div>
+            {contention.kind === 'borrowed-cpu' ? (
+              <details className="risk-detail">
+                <summary>
+                  <span className="chip chip--warn">Borrowed CPU · {contention.workloadCount} workload{contention.workloadCount === 1 ? '' : 's'}</span>
+                  <small>{contention.contendedNodeCount} of {contention.nodesEvaluated} packed node{contention.nodesEvaluated === 1 ? '' : 's'} contended</small>
+                </summary>
+                <div className="risk-table-scroll">
+                  {/* The engine composes one sentence per flag so that every API
+                      consumer reports contention identically; these columns are
+                      §4's rendering of the same numbers. The sentence rides along
+                      as the row's tooltip rather than being recomposed here — if
+                      the table ever needs wording the engine does not supply,
+                      that is a gap in the engine's flag, not one to fill in TSX.
+                      The tooltip is a mouse-only convenience, deliberately: it carries
+                      no number the columns do not already show, so a reader who cannot
+                      hover loses phrasing, not information. */}
+                  <table className="risk-table">
+                    <thead>
+                      <tr>
+                        <th scope="col">Workload</th>
+                        <th scope="col">Container</th>
+                        <th scope="col">Request</th>
+                        <th scope="col">Usage</th>
+                        <th scope="col">Replicas</th>
+                        <th scope="col">worst case (bound)</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {/* Millicores, not `formatCpu`: these three columns are read against
+                          one another, and a 750m request beside a "2 cores" usage is the
+                          one comparison the row exists to make.
+
+                          The key pairs the two fields the engine aggregates on, and `/` cannot
+                          collide: a container name is a DNS label, so everything after the last
+                          slash is the container and everything before it is the workload. */}
+                      {contention.flags.map((flag) => (
+                        <tr key={`${flag.workload}/${flag.container ?? ''}`} title={flag.message}>
+                          <td>{flag.workload}</td>
+                          <td>{flag.container ?? '—'}</td>
+                          <td className="num">{flag.cpu_request_m}m</td>
+                          <td className="num">{flag.usage_cpu_m}m <small>{flag.usage_basis}</small></td>
+                          <td className="num">{flag.replicas_affected} of {flag.replicas_total}</td>
+                          <td className="num">{flag.worst_case_share_m}m</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+                {contention.namesContainers && (
+                  <p className="risk-note">Container rows name only the containers the import listed; a pod may be borrowing more than its rows account for.</p>
+                )}
+              </details>
+            ) : (
+              <p className="risk-note">{contention.kind === 'clear'
+                ? 'No CPU contention detected on this packing.'
+                : 'No nodes were packed for this pool, so runtime risk was not evaluated.'}</p>
+            )}
+            {contention.basisNote !== null && <p className="risk-note">{contention.basisNote}</p>}
+            {/* Cluster-wide, not per-pool — `limits` sums every workload in the scenario.
+                §4 keeps today's sums as they are, so the tiles say whose they are rather
+                than quietly re-scoping a shipped number under a per-pool heading. */}
+            <div className="limit-summary">
+              <div><span>CPU runtime limit</span><strong className={limits?.cpuUnbounded ? 'is-unbounded' : 'num'}>{limits?.cpuUnbounded ? 'Unbounded' : formatCpu(limits?.cpu ?? 0)}</strong><small>all pools</small></div>
+              <div><span>Memory runtime limit</span><strong className={limits?.memoryUnbounded ? 'is-unbounded' : 'num'}>{limits?.memoryUnbounded ? 'Unbounded' : formatMemory(limits?.memory ?? 0)}</strong><small>all pools</small></div>
+            </div>
+            <p className="risk-note">Requests alone drive placement; limits and usage drive the runtime risk read above.</p>
           </section>
 
           <section className="delta-strip">

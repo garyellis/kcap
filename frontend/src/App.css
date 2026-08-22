@@ -361,7 +361,7 @@
 .metric small { margin-top: 3px; display: block; overflow: hidden; color: var(--text-3); font-size: 11.5px; text-overflow: ellipsis; }
 
 .result-section { padding: 18px 20px; }
-.result-section + .result-section, .limit-summary, .delta-strip { border-top: 1px solid var(--line); }
+.result-section + .result-section, .runtime-risk, .delta-strip { border-top: 1px solid var(--line); }
 .result-section:first-of-type { border-top: 1px solid var(--line); margin-top: 16px; }
 .result-section-heading { margin-bottom: 12px; display: flex; align-items: baseline; justify-content: space-between; gap: 10px; }
 .result-section-heading > span { color: var(--ink); font-size: 13px; font-weight: 600; }
@@ -415,15 +415,34 @@
 .projection-row b { color: var(--text-3); font: 450 12px var(--font-mono); font-variant-numeric: tabular-nums; }
 .projection-row strong { color: var(--ink); font: 600 13px var(--font-mono); font-variant-numeric: tabular-nums; }
 
-/* ---------- Limit summary ---------- */
+/* ---------- Runtime risk (contention flags + limit sums) ---------- */
 
-.limit-summary { display: grid; grid-template-columns: 1fr 1fr; }
-.limit-summary > div { padding: 14px 20px; }
-.limit-summary > div + div { border-left: 1px solid var(--line); }
+.runtime-risk { padding: 18px 20px; }
+/* Every line under the heading is muted informational prose: the all-clear, the
+   engine's basis notes, the container caveat, and the section caption. Warn tone
+   belongs to the chip alone — nothing here is red on arrival. */
+.risk-note { margin: 10px 0 0; color: var(--text-3); font-size: 12px; line-height: 1.55; }
+.risk-detail > summary { display: flex; align-items: center; flex-wrap: wrap; gap: 4px 9px; cursor: pointer; list-style: none; }
+.risk-detail > summary::-webkit-details-marker { display: none; }
+.risk-detail > summary::before { content: '▸' / ''; order: -1; color: var(--text-3); font-size: 10px; }
+.risk-detail[open] > summary::before { content: '▾' / ''; }
+.risk-detail > summary small { color: var(--text-3); font: 450 12px var(--font-mono); font-variant-numeric: tabular-nums; }
+.risk-table-scroll { margin-top: 12px; overflow-x: auto; }
+/* The panel is narrow, so every heading and cell may wrap rather than push the
+   worst-case column out of sight; `overflow-x` is the safety net, not the plan. */
+.risk-table { width: 100%; border-collapse: collapse; font-size: 12px; text-align: left; }
+.risk-table th { padding: 0 8px 6px 0; color: var(--text-3); font-weight: 500; line-height: 1.35; }
+.risk-table td { padding: 6px 8px 6px 0; border-top: 1px solid var(--line); color: var(--text-2); line-height: 1.4; }
+/* Workload and container names are the only unbounded strings here, and a long
+   `namespace/name` would otherwise push the worst-case column out of the panel. */
+.risk-table td:nth-child(-n+2) { overflow-wrap: anywhere; }
+.risk-table td:first-child { color: var(--ink); }
+.risk-table small { color: var(--text-3); }
+.limit-summary { margin-top: 16px; padding-top: 14px; border-top: 1px solid var(--line); display: grid; grid-template-columns: 1fr 1fr; gap: 20px; }
 .limit-summary span { display: block; color: var(--text-3); font-size: 12px; font-weight: 500; }
+.limit-summary small { margin-top: 3px; display: block; color: var(--text-3); font-size: 11.5px; }
 .limit-summary strong { margin-top: 3px; display: block; color: var(--ink); font-size: 17px; font-weight: 600; font-variant-numeric: tabular-nums; }
 .limit-summary strong.is-unbounded { color: var(--warn); font-size: 13px; line-height: 24px; }
-.limit-summary p { grid-column: 1 / -1; margin: 0; padding: 8px 20px 14px; color: var(--text-3); font-size: 12px; }
 
 /* ---------- Delta strip ---------- */
 
@@ -467,9 +486,10 @@ footer { min-height: 40px; padding: 0 24px; display: flex; align-items: center; 
   .results-panel { grid-column: 1 / -1; }
   .result-content { display: grid; grid-template-columns: 1fr 1fr; column-gap: 0; }
   .verdict, .metric-grid, .delta-strip { grid-column: 1 / -1; }
-  .result-section, .limit-summary { min-width: 0; }
+  .result-section, .runtime-risk { min-width: 0; }
   .result-section:nth-of-type(3) { border-left: 1px solid var(--line); }
-  .limit-summary { border-left: 1px solid var(--line); }
+  .runtime-risk { border-left: 1px solid var(--line); }
+  .limit-summary { grid-template-columns: 1fr; gap: 12px; }
 }
 
 @media (max-width: 760px) {
@@ -502,7 +522,7 @@ footer { min-height: 40px; padding: 0 24px; display: flex; align-items: center; 
   .stat-strip--4 > div:nth-child(-n+2) { border-bottom: 1px solid var(--line); }
   .result-content { display: block; }
   .result-section:nth-of-type(3) { border-left: 0; }
-  .limit-summary { border-left: 0; }
+  .runtime-risk { border-left: 0; }
 }
 
 @media (max-width: 460px) {

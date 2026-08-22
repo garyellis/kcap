@@ -18,10 +18,11 @@ A scenario is **promoted** to `frontend/e2e/` once its expectation is settled, s
 cannot silently rot between passes. Promotion is an anti-rot guard for decisions already
 made — it is not a discovery tool, and it does not retire the manual walk.
 
-Every row carries exactly one status. Ten are **Automated**, naming their spec file and
+Every row carries exactly one status. Twelve are **Automated**, naming their spec file and
 keeping a separate **Last walked manually** date that CI never touches. Six are **manual
-only**, each saying why automating it would be worse than not. Three are **not yet
-promoted** — eligible, simply not in the first batch.
+only**, each saying why automating it would be worse than not. Two are **not yet
+promoted** — both carry an expectation P2.3 has just written or just changed, and wait one
+session for it to settle.
 
 ```bash
 mise run e2e      # the promoted scenarios, on a build the suite makes itself
@@ -75,8 +76,11 @@ Then open <http://localhost:8123>.
   A promoted scenario whose manual date is old is fine; a promoted scenario nobody has ever
   walked is not.
 - The test asserts what the operator reads, in the operator's words. If the row says the
-  field reads `1 pods`, the test reads the field — never app state, never a JSON blob (R19
-  is the exception that proves it: there, the exported JSON *is* the readout). The selector
+  field reads `1 pods`, the test reads the field — never app state, never a JSON blob. The two
+  exceptions prove it: R19 and R18 both read the exported scenario, and only for the
+  per-container breakdown, which has no readout of its own outside the Runtime risk table's
+  borrowing rows — a breakdown on an uncontended pool still shows nowhere but the export, so there
+  the exported JSON *is* what the operator reads. The selector
   policy is stated once, in `frontend/e2e/support/kcap.ts`, and followed everywhere.
 - Pin the relationship the scenario claims, not the number it happened to show. R3's claim
   is "+1 surge pod at any replica count", so its test moves the replica ceiling and re-reads
@@ -98,7 +102,7 @@ errors.
 **Origin:** baseline · **Manual only:** this is the check that the app renders at all. An
 automated version would be the suite testing its own harness — if the app did not load, every
 other promoted test would already be red, and none of them would tell you it was this. A human
-opening the page is the honest form of it. · **Last verified:** 2026-08-20 (Session F)
+opening the page is the honest form of it. · **Last verified:** 2026-08-21 (Session H)
 
 ### R2 — Observed usage moves the HPA recommendation
 **Pins:** the usage editor reaches `evaluate_hpa` end to end. The editor posts the
@@ -121,12 +125,18 @@ pod** to `400` and blur. (b) Set it to `900` and blur. (c) Now raise **Average C
 to `1200` and blur.
 **Expect:** (a) the field snaps to `620` — the average is the smallest honest peak. (b) it holds
 `900`. (c) the peak follows the average up to `1200`, never left stranded below it. Every
-projected number — the five scenario tabs, the verdict, the CA action — is identical before and
-after (a) and (b); only (c) moves them, and it moves them because the *average* changed. No 422
-anywhere. Setting a peak back to `0` clears the measurement.
-**Origin:** P1.3 (Session E) · **Not yet promoted** — eligible; the expectation is settled,
-it simply was not part of the first promotion batch. · **Last verified:** 2026-08-20
-(Session E, before the compat cleanup — which did not touch `usage.ts` or these fields)
+projected number — the five scenario tabs, the verdict, the CA action, the placement — is
+identical before and after (a) and (b); only (c) moves them (12 → 18 pods, `−3` → `−2`), and it
+moves them because the *average* changed. The **Runtime risk** section moves at both steps, which is
+what P2.3 gave the peak a readout for: (a) rewrites the basis note from `2 workloads` to
+`1 workload`, because `api` now has a peak; (b) raises the chip. Contention is additive context,
+so it reads the peak without any node number reading it. No 422 anywhere. Setting a peak back to `0`
+clears the measurement.
+**Origin:** P1.3 (Session E), expectation extended by P2.3 (Session H) ·
+**Not yet promoted** — was eligible, and is deliberately held back one more session: P2.3 has
+just changed what this scenario expects, and the promotion rule is that a test guards a settled
+decision, not a fresh one. · **Last verified:** 2026-08-21 (Session H, walked end to end for the
+first time — the peak now has a readout to check it against)
 
 ---
 
@@ -256,6 +266,51 @@ the clamp, and a test can check the string without noticing it is the wrong stri
 
 ---
 
+## Runtime risk
+
+### R20 — The Runtime risk section says what was examined, not just what was found
+**Pins:** P2.3. `cpu_contention` has three states the panel must not blur together, and two of
+them look identical if the readout only ever renders flags. `null` means the packer opened no
+nodes, so nothing was examined; an empty `flags` list means nodes were examined and none was
+contended. Rendering the all-clear for `null` would claim kcap checked something it never
+looked at. The section is additive context: no flag may move a node number.
+**Steps:** (a) load the default configuration and read the **Runtime risk** section in the
+results panel, on the `Desired` tab the app opens on — every number below is that tab's.
+(b) Select `api` and set **Peak CPU usage / pod** to `2000`, blur.
+Expand the chip. (c) Reset, then set **CPU request** to `8000` on both `api` and `worker`.
+(d) Reset and import fixture **F5** with `Replace configuration`, then expand the chip.
+**Expect:**
+- (a) one neutral line, `No CPU contention detected on this packing.`, and one muted line
+  beneath it — the engine's basis note, `Peak unavailable for 2 workloads — avg used;
+  contention here is a lower bound.` No chip, no colour. Below them the section still carries the
+  two limit tiles (`CPU runtime limit`, `Memory runtime limit`), which P2.3 moved into it, and now
+  ends with the swapped caption `Requests alone drive placement; limits and usage drive the
+  runtime risk read above.`
+- (b) a warn-tone chip reading `BORROWED CPU · 1 WORKLOAD` — the app's chips are uppercased in
+  CSS — with `2 of 3 packed nodes contended` beside it. Every projected number is unchanged from (a): the five scenario tabs, `Capacity
+  clear`, `CA action −3`, `Placement 3`, and the baseline/candidate strip at `+0`. Expanded, one
+  row: `api`, container `—`, request `750m`, usage `2000m peak`, `8 of 8` replicas, and `771m`
+  under a column headed exactly `worst case (bound)`. Hovering the row shows the engine's own
+  sentence, which the panel never rewrites; it is a hover only, and deliberately carries no number
+  the columns do not already show.
+- (c) `No nodes were packed for this pool, so runtime risk was not evaluated.` — and no basis
+  note, because a pool that packed nothing has nothing to disclose a basis for.
+- (d) the chip still reads `1 WORKLOAD` while the table has **two** rows — flags are per
+  (workload, container), and the chip counts workloads. `app` reads `500m` / `1700m peak` /
+  `514m`; `istio-proxy` reads `19m` / `300m peak` / `19m`. A further muted line appears above the
+  basis note: `Rows name only the containers the import listed; a pod may be borrowing more than
+  its rows account for.` It is absent in (b), where the flag is pod-level and carries the whole
+  pod's excess already.
+**Origin:** P2.3 (Session H) · **Not yet promoted** — eligible next session, once the wording
+has survived a review. Whoever promotes it must widen `checklistFixture`'s fixture union in
+`frontend/e2e/support/checklist.ts` to include `'F5'`; the fence itself already parses the way
+that reader expects. The caveat line in (d) is an owner decision taken this
+session, and the three-state distinction is the whole point of the row, so a test written today
+would freeze prose still one review away from settled. · **Last verified:** 2026-08-21
+(Session H)
+
+---
+
 ## Import
 
 Press **Import**, paste a fixture into the Step 2 box, and commit. A cluster-export payload
@@ -315,8 +370,9 @@ button *appears*, so "it is gone" cannot pass because the locator quietly stoppe
 **Last walked manually:** 2026-08-20 (Session E, re-walked after the compat cleanup)
 
 ### R18 — Per-container detail arrives, or the dialog says why it did not
-**Pins:** P1.6. Per-container requests, limits, and usage have no readout of their own — the
-analysis that will use them is Phase 2 — so the only places the screen can lie are the import
+**Pins:** P1.6. Per-container requests, limits, and usage reach the screen only through P2.3's
+Runtime risk table, and only for a container borrowing CPU on a contended node — for this fixture,
+which contends nowhere, they have no readout at all — so the only places the screen can lie are the import
 dialog's two new lines and the saved scenario the config exports. A silent `containers: null`
 would look exactly like a successful import.
 **Steps:** import fixture **F4**, which mixes one workload whose containers are named with one
@@ -332,13 +388,20 @@ has no container entry. In the exported JSON, `demo/web` carries a `containers` 
 entry has `observed_cpu.avg: 300`, and `demo/legacy` carries `"containers": null`. The re-import
 returns to `0 changes` with the pill still `Live` — the field survives save/load, and the engine
 accepts it without a 422.
-**Origin:** P1.6 (Session F) · **Not yet promoted** — eligible, and the natural next
-promotion. Left out to bound the first batch, not on any principle that separates it from R19,
-which came out of the same session and was promoted. · **Last verified:** 2026-08-20 (Session F)
+**Origin:** P1.6 (Session F) ·
+**Automated:** `frontend/e2e/import.spec.ts` — the dialog's warning is counted the way an
+operator counts them (one `Heads up.` callout) and quoted verbatim; both notes are asserted by
+their sentences, but their *count* is not, because a note is a paragraph with no role or
+accessible name and counting them would need a CSS class the selector policy forbids. The
+breakdown assertions read the exported JSON, on R19's justification and for the breakdown only —
+every pod-level number (`250` / `500` / `100` mCPU, the `510` average) is read off the fields.
+Proven able to fail in both halves: suppressing the injected-sidecar note turns the dialog
+assertion red, and dropping `containers` from the export turns the breakdown assertion red ·
+**Last walked manually:** 2026-08-20 (Session F)
 
 ### R19 — A pod-level edit drops the breakdown it just contradicted
-**Pins:** the C2 resolution. Per-container detail has no readout, so a stale breakdown is
-invisible on screen — the exported scenario is the only place the contradiction shows. The bug
+**Pins:** the C2 resolution. Per-container detail reaches the screen only as a Runtime risk row
+for a borrowing container on a contended node, so on this fixture a stale breakdown is invisible — the exported scenario is the only place the contradiction shows. The bug
 this replaces: a workload edited from `250` to `500` mCPU exported `cpu_request_m: 500` beside a
 container entry still claiming `250`, with nothing able to say which was current.
 **Steps:** import fixture **F4** and commit with **Replace workloads**. Select `demo/web`, press
@@ -355,7 +418,8 @@ surge** — leaves the breakdown intact. No 422, and the pill stays `Live`.
 the three moved, and proven able to fail in both directions: making a pod-level edit keep the
 breakdown turns the two "clears it" tests red, and making every edit drop it turns "leaves it
 intact" red. This is the one promoted scenario that parses JSON, and deliberately: the
-breakdown has no readout, so the exported scenario *is* what the operator reads. The test takes
+breakdown has no readout on an uncontended pool, so the exported scenario *is* what the
+operator reads. The test takes
 that JSON off the Export modal, not from the API. ·
 **Last walked manually:** 2026-08-20 (Session F; walked all three edits — CPU request 250 → 500
 and average usage 510 → 900 both cleared it, replicas 2 → 5 left it whole)
@@ -367,8 +431,17 @@ than stored.
 `Download`); open **Import**, paste into the Step 2 box, and press `Replace configuration`.
 **Expect:** every workload, the pool, and the surge field (`1 pods`) come back unchanged, and
 the change chip returns to `0 changes`.
-**Origin:** P0.2 follow-up (Session B) · **Not yet promoted** — eligible; R19 already
-exercises the export half through the same modal. · **Last verified:** 2026-08-20 (Session D)
+**Origin:** P0.2 follow-up (Session B) ·
+**Automated:** `frontend/e2e/import.spec.ts` — the round-trip is read off the *fields*, not the
+exported JSON: every workload editor field and every pool field is read before and after and
+compared with itself, so the test pins "save/load changes nothing" rather than any particular
+default. A field hidden behind an off toggle is recorded as `not shown`, so a round trip that
+lost an HPA or a limit fails as loudly as one that lost a value, and the topbar's
+`primary · 2 workloads` line catches a workload dropped or invented. The surge unit is asserted
+on its own because it is the reading the row is about. Proven able to fail: an export that drops
+`max_surge_pods` brings the field back as `25 %`, and one that resets `min_nodes` fails the
+field-by-field comparison ·
+**Last walked manually:** 2026-08-20 (Session D)
 
 ---
 
@@ -396,6 +469,29 @@ which. This is the same class as the P0.3 follow-up that stopped suppressing `no
 resolved there by showing both statements; the density and placement tiles were not part of
 that change.
 **Status:** open, needs owner sign-off before anything moves.
+
+### C3 — The peak sliders have a dead zone the length of the average
+**Observed:** 2026-08-21 (Session H, while walking R16 end to end for the first time). **Peak
+CPU usage / pod** has a slider track running `0`–`4000`, and `withPeak` raises any value below
+the average up to the average. On the shipped `api` (average 620) that makes the bottom ~15% of
+the track a dead zone: every position between the first step and the average reads `620`, so the
+thumb appears stuck and the control appears broken. Only `0` itself stays distinct, because it is
+how the field spells "not measured". **Peak memory usage / pod** has the same shape against its own average.
+**Why it is not a wrong number:** the coercion is correct and deliberate — `usage.ts` raises
+rather than rejects because a peak at least equal to the average is true of every distribution,
+and R16 pins that behavior. The typed field shows it plainly (type `400`, watch it become `620`).
+Only the *slider* misrepresents it, by offering positions that are not distinct values.
+**The question:** what a slider should do over a range whose lower part is not addressable.
+Raising the slider's `min` to the current average is the obvious fix and is wrong as stated: `0`
+is a meaningful value on this field — it is how the editor spells "not measured" — so it must
+stay reachable. Options worth weighing: say the coercion out loud in the field's existing
+hint (`Optional; 0 = not measured`), which changes nothing an operator can express; leave it
+altogether, since the typed field is authoritative and shows the coercion plainly; start the track
+at the average and keep `0` reachable only by typing; or mark the coerced floor on the track. The
+last two change what the control can express, which is why this is an owner call rather than a
+CSS tweak.
+**Status:** open, needs owner sign-off before anything moves. Logged rather than fixed because
+none of the three options is unambiguous, and P2.3 did not touch `usage.ts` or these fields.
 
 ### ~~C2 — An imported per-container breakdown survives pod-level edits and goes stale~~
 **RESOLVED 2026-08-20** (owner chose to drop the breakdown on a pod-level edit). Promoted to
@@ -427,7 +523,7 @@ or changing a fence to something other than ```` ```json ```` fails the suite lo
 the correct outcome.
 
 F1, F2, and F4 are `kcap-cluster-export` version 1 with no node block, so the
-importer derives a single default pool. F3 is a saved kcap scenario, not an export. F1 and F2
+importer derives a single default pool. F3 and F5 are saved kcap scenarios, not exports. F1 and F2
 name their containers, as every real export does since P1.6 — a nameless one is a stale export
 script, which is what F4's second workload exists to show.
 
@@ -498,4 +594,45 @@ it.
   {"kind":"Deployment","namespace":"demo","name":"legacy","replicas":1,
    "containers":[{"resources":{"requests":{"cpu":"100m","memory":"128Mi"}}}],
    "initContainers":[]}]}
+```
+
+### F5 — A per-container breakdown whose containers both borrow CPU
+
+A saved scenario, not a cluster export, so it commits with **Replace configuration**.
+`web/payments` carries a two-container breakdown with peaks: `app` peaks at `1700m` against a
+`500m` request, and the injected-style `istio-proxy` peaks at `300m` against `19m`. Both
+borrow, so the expansion shows two rows for one workload. `worker` has no peak at all, which is
+what produces the avg-fallback basis note beside them.
+
+```json
+{"kind":"kcap-scenario","version":3,"exported_at":"2026-08-21T00:00:00.000Z","config":{
+ "workloads":{
+  "web/payments":{"name":"web/payments","current_replicas":6,"pool":"primary",
+   "resources":{"cpu_request_m":750,"memory_request_mib":1024,
+    "cpu_limit_m":2000,"memory_limit_mib":2048},
+   "observed_cpu_per_pod":{"avg":620,"p95":null,"peak":2000},
+   "observed_memory_per_pod":{"avg":780,"p95":null,"peak":null},
+   "usage_window_seconds":60,"usage_source":"metrics-server-samples",
+   "containers":[
+    {"name":"app","cpu_request_m":500,"memory_request_mib":768,"cpu_limit_m":1500,
+     "memory_limit_mib":1536,"observed_memory":null,
+     "observed_cpu":{"avg":500,"p95":null,"peak":1700}},
+    {"name":"istio-proxy","cpu_request_m":19,"memory_request_mib":128,"cpu_limit_m":null,
+     "memory_limit_mib":null,"observed_memory":null,
+     "observed_cpu":{"avg":120,"p95":null,"peak":300}}],
+   "hpa":{"min_replicas":3,"max_replicas":18,
+    "cpu_target_percentage":70,"memory_target_percentage":75},
+   "rollout":{"max_surge_percent":25,"max_surge_pods":null}},
+  "worker":{"name":"worker","current_replicas":4,"pool":"primary","containers":null,
+   "resources":{"cpu_request_m":500,"memory_request_mib":768,
+    "cpu_limit_m":1500,"memory_limit_mib":1536},
+   "observed_cpu_per_pod":{"avg":310,"p95":null,"peak":null},
+   "observed_memory_per_pod":{"avg":520,"p95":null,"peak":null},
+   "usage_window_seconds":0,"usage_source":"metrics-server-snapshot",
+   "hpa":{"min_replicas":2,"max_replicas":12,
+    "cpu_target_percentage":70,"memory_target_percentage":null},
+   "rollout":{"max_surge_percent":25,"max_surge_pods":null}}},
+ "node_pools":{"primary":{"name":"primary","min_nodes":3,"current_nodes":6,"max_nodes":20,
+  "machine":{"cpu_m":4000,"memory_mib":16384,"reserved_cpu_m":400,
+   "reserved_memory_mib":1536,"max_pods":110}}}}}
 ```

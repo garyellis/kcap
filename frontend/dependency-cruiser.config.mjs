@@ -40,8 +40,8 @@ export default {
       name: 'core-does-not-import-ui',
       severity: 'error',
       comment:
-        'API, defaults, import logic, surge math, usage-stat edits, container-breakdown invalidation, and CA-action mapping stay independent from React UI modules.',
-      from: { path: '^src/(?:api|breakdown|caAction|defaults|importers|surge|usage)[.]ts$' },
+        'API, defaults, import logic, surge math, usage-stat edits, container-breakdown invalidation, contention readout, and CA-action mapping stay independent from React UI modules.',
+      from: { path: '^src/(?:api|breakdown|caAction|contention|defaults|importers|surge|usage)[.]ts$' },
       to: { path: '^src/(?:components/|main[.]tsx$|App[.]tsx$)' },
     },
   ],

@@ -70,10 +70,58 @@ export class Kcap {
     return this.page.getByRole('button', { name: startingWith(name) })
   }
 
+  /**
+   * The catalog button for a node pool, named `primary 6 nodes · 4 · 16 GiB`.
+   * The same control as a workload entry — one catalog, two groups — so it is
+   * addressed the same way; only the editor it opens differs.
+   */
+  nodePool(name: string): Locator {
+    return this.page.getByRole('button', { name: startingWith(name) })
+  }
+
   async selectWorkload(name: string): Promise<void> {
     await this.workload(name).click()
     // The editor heading is how an operator confirms which workload they are on.
     await expect(this.page.getByRole('heading', { level: 2, name })).toBeVisible()
+    await this.editorCaughtUp(this.workload(name), /(\d+) pods/, 'Current replicas')
+  }
+
+  async selectNodePool(name: string): Promise<void> {
+    await this.nodePool(name).click()
+    await expect(this.page.getByRole('heading', { level: 2, name })).toBeVisible()
+    await this.editorCaughtUp(this.nodePool(name), /(\d+) nodes/, 'Current nodes')
+  }
+
+  /**
+   * Wait for the editor's fields to catch up with the catalog entry that opened
+   * them.
+   *
+   * kcap's number fields hold a draft copy of the value they show and sync it in
+   * an effect, which lands one render *after* the heading changes — so for one
+   * render the editor prints the previous selection's numbers under the new
+   * selection's name. A human never sees it; a test that reads a value the
+   * instant the heading appears does, and R14 caught exactly that under a loaded
+   * parallel run. The catalog entry prints the same number the field does, so
+   * their agreeing is the screen's own "this editor is the thing you clicked".
+   */
+  private async editorCaughtUp(entry: Locator, summary: RegExp, label: string): Promise<void> {
+    const line = (await entry.innerText()).replace(/\s+/g, ' ')
+    const match = summary.exec(line)
+    expect(match, `the catalog entry "${line}" no longer prints ${label}`).not.toBeNull()
+    await expect(this.field(label), `the editor still shows the previous selection's ${label}`).toHaveValue(
+      match?.[1] ?? '',
+    )
+  }
+
+  /**
+   * The topbar's one-line summary of the configuration: `primary · 2 workloads`
+   * — the pool name (or `N node pools`) and the workload count. It is how an
+   * operator sees at a glance that nothing was gained or lost.
+   */
+  async configurationSummary(): Promise<string> {
+    // Anchored at the end so the match is the summary line itself rather than
+    // the whole header, which carries the buttons and the connection pill too.
+    return (await this.page.getByText(/ · \d+ workloads$/).innerText()).trim()
   }
 
   // --- the workload editor --------------------------------------------------
@@ -247,10 +295,16 @@ export type ExportedScenario = {
       {
         resources: { cpu_request_m: number }
         observed_cpu_per_pod: { avg: number } | null
-        containers: unknown[] | null
+        containers: ExportedContainer[] | null
       }
     >
   }
+}
+
+/** One entry of a workload's per-container breakdown, as the export writes it. */
+export type ExportedContainer = {
+  name: string
+  observed_cpu: { avg: number } | null
 }
 
 /**

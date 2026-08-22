@@ -29,12 +29,13 @@ node strands the remaining core on every node it lands on.
 - Whether the HPA is saturated, or the rollout is what's really sizing the cluster.
 - Five scenarios per evaluation: `hpa_min`, `current`, `hpa_desired`,
   `hpa_max`, and `hpa_max_rollout`.
-- CPU contention per pool, on `/v1/evaluate` (no UI readout yet): which
-  workloads — and, when the import carried a breakdown, which containers
-  inside them — are observed above the CPU request that is their only
-  guarantee, on nodes whose pods together want more CPU than the node can
-  schedule. Each flag carries a worst-case share of the node, labeled a bound
-  rather than a prediction.
+- CPU contention per pool, on `/v1/evaluate` and in the results panel's
+  **Runtime risk** section: which workloads — and, when the import carried a
+  breakdown, which containers inside them — are observed above the CPU request
+  that is their only guarantee, on nodes whose pods together want more CPU than
+  the node can schedule. Each flag carries a worst-case share of the node,
+  labeled a bound rather than a prediction. It is additive context and never a
+  verdict: a flag moves no node count, no scenario, and no scale-up advice.
 - Baseline-vs-candidate comparison: edit a request, an HPA ceiling, or a
   machine size, and `/v1/compare` returns both results, the config diff, and
   the impact diff.
