@@ -80,6 +80,29 @@ function describeConstraint(scenario?: PoolScenarioResult): { label: string; not
   }
 }
 
+// An oversized pod splits the panel across two pod populations: the verdict
+// counts the pods no node can hold, and the node numbers beside it size only the
+// rest. Both readings belong on screen — withholding one is the mistake
+// `caAction.ts` describes — so each says which pods it is about, and only while
+// there are two populations to tell apart.
+function describePopulations(
+  oversizedPodCount: number,
+  minNodes: number,
+): { placement: string; effectiveTarget: string; density: string } {
+  if (oversizedPodCount === 0) {
+    return { placement: 'nodes to hold the pods', effectiveTarget: `after CA minimum ${minNodes}`, density: '' }
+  }
+  return {
+    placement: 'nodes for the pods that fit',
+    // The tile sits beside Placement, which has just named the population.
+    effectiveTarget: `same pods, after CA minimum ${minNodes}`,
+    // Appended as its own sentence: the density claim is the only reading in
+    // that section computed over the placeable pods, while the request bars
+    // above it total every pod the pool asks for.
+    density: ` That per-node figure counts only the pods that fit, not the ${oversizedPodCount} requesting more than one whole node.`,
+  }
+}
+
 function Metric({ label, value, note }: { label: string; value: ReactNode; note?: string }) {
   return (
     <div className="metric">
@@ -513,6 +536,8 @@ function ResultsPanel({
   })
 
   const constraint = describeConstraint(poolScenario)
+  const oversizedPodCount = poolScenario?.oversized_pod_count ?? 0
+  const populations = describePopulations(oversizedPodCount, activePoolConfig?.min_nodes ?? 0)
   const deltaNodes = scenario ? scenario.effective_nodes_required - (baselineScenario?.effective_nodes_required ?? scenario.effective_nodes_required) : 0
   // Cluster totals carry no blocked reason, so it is read off the pools: without
   // that, an idle cluster would total to "Hold" while every pool it sums says
@@ -580,8 +605,8 @@ function ResultsPanel({
               <strong><i className="verdict-dot" />{poolScenario.schedulable ? 'Capacity clear' : 'Capacity blocked'}</strong>
               <p>{poolScenario.schedulable
                 ? 'All pods fit within the autoscaler envelope.'
-                : poolScenario.oversized_pod_count > 0
-                  ? `${poolScenario.oversized_pod_count} pod${poolScenario.oversized_pod_count === 1 ? '' : 's'} request more than one whole node. No node count places them.`
+                : oversizedPodCount > 0
+                  ? `${oversizedPodCount} pod${oversizedPodCount === 1 ? '' : 's'} request more than one whole node. No node count places them.`
                   : 'A placement constraint exceeds the configured envelope.'}</p>
             </div>
             {/* A labelled group, so the reading (`−3`, `nodes`) has a boundary a
@@ -595,8 +620,8 @@ function ResultsPanel({
           </section>
 
           <div className="metric-grid">
-            <Metric label="Placement" value={poolScenario.nodes_required} note="nodes to hold the pods" />
-            <Metric label="Effective target" value={poolScenario.effective_nodes_required} note={`after CA minimum ${activePoolConfig.min_nodes}`} />
+            <Metric label="Placement" value={poolScenario.nodes_required} note={populations.placement} />
+            <Metric label="Effective target" value={poolScenario.effective_nodes_required} note={populations.effectiveTarget} />
             <Metric label="Headroom" value={poolScenario.node_headroom} note={`CA max ${activePoolConfig.max_nodes}`} />
             <Metric label="Constraint" value={<span className={`chip${constraint.tone === 'warn' ? ' chip--warn' : ''}`}>{constraint.label}</span>} note={constraint.note} />
           </div>
@@ -611,7 +636,7 @@ function ResultsPanel({
                 Provisioned capacity, not the live pool. {poolScenario.pods_per_node === 1
                   ? 'Only one pod fits per node'
                   : `${poolScenario.pods_per_node} pods fit per node`} at this shape, so the remainder cannot be
-                filled without changing requests or node size.
+                filled without changing requests or node size.{populations.density}
               </p>
             )}
           </section>
