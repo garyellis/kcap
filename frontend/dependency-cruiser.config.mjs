@@ -40,8 +40,8 @@ export default {
       name: 'core-does-not-import-ui',
       severity: 'error',
       comment:
-        'API, defaults, import logic, surge math, usage-stat edits, container-breakdown invalidation, contention readout, and CA-action mapping stay independent from React UI modules.',
-      from: { path: '^src/(?:api|breakdown|caAction|contention|defaults|importers|surge|usage)[.]ts$' },
+        'Every plain .ts module at the root of src/ is core — the API boundary, import transforms, and the pure logic the panels read — and none of them may import a React module. Closed by default: a new src/*.ts is covered the moment it exists, with no list to remember to extend. Tests are exempt so one may render the component it tests.',
+      from: { path: '^src/[^/]+[.]ts$', pathNot: '[.](?:spec|test)[.]ts$' },
       to: { path: '^src/(?:components/|main[.]tsx$|App[.]tsx$)' },
     },
   ],

@@ -36,6 +36,14 @@ node strands the remaining core on every node it lands on.
   the node can schedule. Each flag carries a worst-case share of the node,
   labeled a bound rather than a prediction. It is additive context and never a
   verdict: a flag moves no node count, no scenario, and no scale-up advice.
+- Node limit exposure per pool, in the same block and the same section: each
+  packed node's memory limits summed against its allocatable memory, with a pod
+  that declares no limit counting as the whole node. Above 100% the node can be
+  exhausted by pods behaving entirely within what they declared. The same
+  arithmetic for CPU rides along in the block as context only — CPU throttles
+  where memory kills, so it never raises a finding, and the panel prints it
+  beside a memory finding rather than on its own. Neither number moves a node
+  count either.
 - Baseline-vs-candidate comparison: edit a request, an HPA ceiling, or a
   machine size, and `/v1/compare` returns both results, the config diff, and
   the impact diff.
@@ -115,8 +123,9 @@ POST /v1/compare     {baseline, candidate} -> both results, config diff, impact 
 - Observed per-pod usage is held constant across all five scenarios, so the
   HPA scenarios show the shape of the response, not a converged steady state.
 - Container limits are imported and validated but don't affect placement, HPA
-  math, or node counts. A CPU limit does cap the worst-case share a contention
-  flag reports; memory limits are read by nothing.
+  math, or node counts. They drive the runtime-risk readout instead: memory
+  limits set each node's exhaustion ceiling, and a CPU limit caps the worst-case
+  share a contention flag reports.
 - Which statistic gets read is a convention. HPA math reads `avg` and nothing
   else; CPU contention reads the highest one available — `peak`, else `p95`,
   else `avg` — and says which it fell back to, so a `p95` does move contention

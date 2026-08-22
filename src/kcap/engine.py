@@ -292,6 +292,45 @@ class CpuContention:
 
 
 @dataclass(frozen=True)
+class LimitExposure:
+    """How far one pool's packed nodes can be driven by declared limits alone.
+
+    Contention asks what happens when neighbors compete for a compressible
+    resource. This asks the incompressible question: if every pod on a node
+    grew to the ceiling it declared, would the node survive it? A pod with no
+    memory limit can grow to the whole node, so it counts as the whole node.
+    """
+
+    # Nodes the packer opened for this pool, on the same terms as CpuContention
+    # counts them.
+    nodes_evaluated: int
+
+    # Nodes whose placed pods' memory ceilings outrun allocatable memory. Such
+    # a node can be exhausted by pods that never exceed what they declared.
+    memory_exhaustible_node_count: int
+
+    # The worst node's ceilings as a percentage of its allocatable memory.
+    memory_max_limit_percent: float
+
+    # Placed pods with no memory limit. Reported on its own because each one
+    # substitutes a whole node into the percentage above, which is true but
+    # drowns the number: one such pod beside anything else already exceeds 100%.
+    memory_unlimited_pod_count: int
+
+    # The worst node's *declared* CPU limits over its allocatable CPU, and
+    # informational only — CPU compresses, so an overcommitted node throttles
+    # rather than kills. A pod without a CPU limit adds nothing here, unlike its
+    # memory counterpart: it cannot exhaust anything, and substituting the node
+    # for it would turn the ratio into a pod count. None when nothing declares a
+    # CPU limit at all.
+    cpu_max_limit_percent: float | None
+
+    # Zero to two plain sentences. Empty means no node here can be exhausted by
+    # pods behaving within their limits.
+    flags: tuple[str, ...]
+
+
+@dataclass(frozen=True)
 class PoolScenarioResult:
     pool: str
     pod_count: int
@@ -334,9 +373,11 @@ class PoolScenarioResult:
     pods_per_node: int | None
     fragmentation_resource: str | None
 
-    # Runtime risk from the packing above. None when the packer opened no
-    # nodes — a pool with nothing placeable has no node to be contended.
+    # Runtime risk from the packing above. Both are None when the packer opened
+    # no nodes — a pool with nothing placeable has no node to be contended, and
+    # none to be exhausted either.
     cpu_contention: CpuContention | None
+    limit_exposure: LimitExposure | None
 
     @property
     def stranded_cpu_m(self) -> int:
@@ -1643,6 +1684,158 @@ def _evaluate_cpu_contention(
     )
 
 
+def _memory_ceiling_mib(resources: list[Resources], allocatable_mib: int) -> int:
+    """What one node's pods could claim together while honoring their limits.
+
+    A pod with no memory limit substitutes the whole node: nothing it declared
+    stops it from taking everything there is.
+    """
+    return sum(
+        allocatable_mib
+        if resource.memory_limit_mib is None
+        else resource.memory_limit_mib
+        for resource in resources
+    )
+
+
+def _percent_of_allocatable(value: int, allocatable: int) -> float:
+    """A percentage that never rounds across the boundary the MiB count decides.
+
+    Exhaustibility is settled in whole MiB, so a node one MiB over its
+    allocatable is exhaustible while its true percentage rounds to a flat
+    100.0 — a number that contradicts the sentence printed beside it. Inside
+    that last tenth of a percent the figure is moved to the correct side of 100
+    rather than to the nearest tenth: which side of the line a node sits on is
+    what the reader needs, and the tenth is not.
+
+    `allocatable` cannot be zero: `validate` requires each pool's reservation to
+    be strictly below its machine in both dimensions.
+    """
+    rounded = round(value / allocatable * 100, 1)
+    if value > allocatable and rounded <= 100.0:
+        return 100.1
+    if value < allocatable and rounded >= 100.0:
+        return 99.9
+    return rounded
+
+
+def _format_percent(percent: float) -> str:
+    """A percentage without a trailing `.0`, so a whole number reads as one."""
+    return f"{percent:.1f}".removesuffix(".0")
+
+
+def _exposure_flags(
+    nodes_evaluated: int,
+    exhaustible_nodes: int,
+    memory_max_percent: float,
+    unlimited_pods: int,
+) -> tuple[str, ...]:
+    """Zero to two plain sentences naming what the numbers above mean.
+
+    Two words are load-bearing. **Ceilings**, not limits: a pod that declares no
+    memory limit contributes the whole node, so calling the total a sum of
+    limits would send the reader looking for a declaration nobody made — the
+    second sentence is what explains where the number came from, and it fires
+    whenever such a pod is placed. And **most exposed**, not fullest: the node
+    reported is the one with the highest ceiling, which is routinely not the one
+    carrying the most requests.
+    """
+    flags: list[str] = []
+    if exhaustible_nodes:
+        noun = "node" if nodes_evaluated == 1 else "nodes"
+        flags.append(
+            f"Memory ceilings on the most exposed node reach "
+            f"{_format_percent(memory_max_percent)}% of allocatable — "
+            f"{exhaustible_nodes} of {nodes_evaluated} {noun} can be exhausted "
+            f"by pods behaving within their limits."
+        )
+    if unlimited_pods == 1:
+        # "Any node it shares", not any node hosting it: alone on a node such a
+        # pod claims exactly what the node has, so it takes a neighbor to push
+        # the ceiling past allocatable.
+        flags.append(
+            "1 pod carries no memory limit; it can claim its whole node, so "
+            "any node it shares can be exhausted."
+        )
+    elif unlimited_pods > 1:
+        flags.append(
+            f"{unlimited_pods} pods carry no memory limit; each can claim its "
+            f"whole node, so any node they share can be exhausted."
+        )
+    return tuple(flags)
+
+
+def _evaluate_limit_exposure(
+    machine: MachineSpec,
+    packed_nodes: list[NodeAllocation],
+    workloads: dict[str, Workload],
+) -> LimitExposure | None:
+    """Read how far this packing's nodes can be driven by declared limits alone.
+
+    Requests decided the packing; this asks what the same nodes look like if
+    every pod on them grew to the ceiling it declared. Memory is the question
+    that matters — a node whose ceilings outrun its allocatable memory can be
+    exhausted by pods that never misbehave — and CPU rides along as a ratio
+    only, because an overcommitted CPU throttles where memory kills.
+
+    Pod-level limits are the whole input. The per-container breakdown is not
+    read here: it is deliberately never cross-checked against the pod totals,
+    so summing it would produce a second, disagreeing ceiling for the same pod.
+    """
+    if not packed_nodes:
+        return None
+
+    memory_allocatable = machine.allocatable_memory_mib
+    cpu_allocatable = machine.allocatable_cpu_m
+    per_node = [
+        [workloads[pod.workload_name].resources for pod in node.pods]
+        for node in packed_nodes
+    ]
+
+    memory_ceilings = [
+        _memory_ceiling_mib(node, memory_allocatable) for node in per_node
+    ]
+    # Counted in MiB rather than off the percentages: a node whose ceilings come
+    # to exactly its allocatable is not exhaustible, and a rounded percentage
+    # cannot be trusted to say which side of that line a node is on.
+    exhaustible_nodes = sum(
+        1 for ceiling in memory_ceilings if ceiling > memory_allocatable
+    )
+    memory_max_percent = _percent_of_allocatable(
+        max(memory_ceilings), memory_allocatable
+    )
+    unlimited_pods = sum(
+        1 for node in per_node for resource in node if resource.memory_limit_mib is None
+    )
+
+    # Declared CPU limits only — a pod without one adds nothing, where its
+    # memory counterpart adds the whole node. The substitution earns its place
+    # on the memory side because an unlimited pod really can exhaust the node;
+    # on the CPU side it would only add 100% per pod without a limit, turning an
+    # overcommit ratio into a pod count. Null when the sum has no declaration
+    # behind it at all, since 0% would read as a finding of its own.
+    declared_cpu_m = [
+        sum(resource.cpu_limit_m or 0 for resource in node) for node in per_node
+    ]
+    cpu_max_percent = None
+    if any(resource.cpu_limit_m is not None for node in per_node for resource in node):
+        cpu_max_percent = _percent_of_allocatable(max(declared_cpu_m), cpu_allocatable)
+
+    return LimitExposure(
+        nodes_evaluated=len(packed_nodes),
+        memory_exhaustible_node_count=exhaustible_nodes,
+        memory_max_limit_percent=memory_max_percent,
+        memory_unlimited_pod_count=unlimited_pods,
+        cpu_max_limit_percent=cpu_max_percent,
+        flags=_exposure_flags(
+            len(packed_nodes),
+            exhaustible_nodes,
+            memory_max_percent,
+            unlimited_pods,
+        ),
+    )
+
+
 def _evaluate_pool_scenario(
     pool: NodePool,
     pods: list[PodRequest],
@@ -1653,7 +1846,7 @@ def _evaluate_pool_scenario(
     `workloads` is the seam for per-node runtime-risk analysis: the packer
     retains its placements, and reaching a placed pod's requests, limits, and
     observed usage means looking the pod's workload up by name. The sizing math
-    below reads neither — contention is additive context, not a new verdict
+    below reads neither — runtime risk is additive context, not a new verdict
     channel, so no node count moves because of it.
     """
     machine = pool.machine
@@ -1741,6 +1934,7 @@ def _evaluate_pool_scenario(
         pods_per_node=pods_per_node,
         fragmentation_resource=fragmentation_resource,
         cpu_contention=_evaluate_cpu_contention(machine, packed_nodes, pods, workloads),
+        limit_exposure=_evaluate_limit_exposure(machine, packed_nodes, workloads),
     )
 
 

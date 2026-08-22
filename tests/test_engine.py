@@ -12,6 +12,7 @@ from kcap.engine import (
     ClusterResult,
     ContainerInfo,
     CpuContention,
+    LimitExposure,
     MachineSpec,
     NodeAllocation,
     NodePool,
@@ -1028,11 +1029,12 @@ def placement_free_pack(
 
 
 def _node_math(result: ClusterResult) -> dict[str, object]:
-    """The whole ClusterResult with only the runtime-risk block removed."""
+    """The whole ClusterResult with only the runtime-risk blocks removed."""
     data = asdict(result)
     for scenario in data["scenarios"].values():
         for pool in scenario["pools"].values():
             pool.pop("cpu_contention")
+            pool.pop("limit_exposure")
     return data
 
 
@@ -1159,6 +1161,40 @@ class TestRetainedPlacements:
         # The premise: without flags this test would prove nothing.
         assert flagged
         assert _node_math(contended_result) == _node_math(evaluate(plain))
+
+    def test_exposure_moves_no_node_number(self) -> None:
+        """Memory limits are read by the risk block and by nothing else.
+
+        Every workload in the fixture gains a memory limit large enough to
+        exhaust the node it lands on, while its request -- the number that
+        packs -- is untouched. The scheduler fits on requests, so not one field
+        of any pool result outside the runtime-risk blocks may move: if one did,
+        a declared ceiling would be quietly sizing the cluster.
+        """
+        plain = representative_cluster()
+        limited = replace(
+            plain,
+            workloads={
+                name: replace(
+                    workload,
+                    resources=replace(workload.resources, memory_limit_mib=8192),
+                )
+                for name, workload in plain.workloads.items()
+            },
+        )
+
+        limited_result = evaluate(limited)
+        flagged = [
+            flag
+            for scenario in limited_result.scenarios.values()
+            for pool in scenario.pools.values()
+            if pool.limit_exposure is not None
+            for flag in pool.limit_exposure.flags
+        ]
+
+        # The premise: without flags this test would prove nothing.
+        assert flagged
+        assert _node_math(limited_result) == _node_math(evaluate(plain))
 
     def test_every_placed_pod_is_retained_on_the_node_that_holds_it(self) -> None:
         machine = MachineSpec(cpu_m=4000, memory_mib=8192, max_pods=110)
@@ -1468,18 +1504,19 @@ class TestContainerBreakdown:
 
 
 # A 4000m / 8192MiB node with nothing reserved, so allocatable CPU is a round
-# 4000m and every bound below can be read off the numbers in the test.
-CONTENTION_MACHINE = MachineSpec(cpu_m=4000, memory_mib=8192)
+# 4000m and allocatable memory a round 8192MiB -- every bound and every
+# percentage below can be read off the numbers in the test.
+RISK_MACHINE = MachineSpec(cpu_m=4000, memory_mib=8192)
 
 
-def contention_cluster(*workloads: Workload) -> ClusterConfig:
-    """One pool of CONTENTION_MACHINE nodes holding the given workloads."""
+def risk_cluster(*workloads: Workload) -> ClusterConfig:
+    """One pool of RISK_MACHINE nodes holding the given workloads."""
     return ClusterConfig(
         workloads={workload.name: workload for workload in workloads},
         node_pools={
             "default": NodePool(
                 name="default",
-                machine=CONTENTION_MACHINE,
+                machine=RISK_MACHINE,
                 min_nodes=1,
                 current_nodes=2,
                 max_nodes=10,
@@ -1510,7 +1547,7 @@ class TestCpuContention:
         # 3500 + 1000 = 4500m of peak against 4000m allocatable, so the node is
         # contended -- and batch, peaking at a third of what it reserved, is not
         # the one borrowing.
-        cluster = contention_cluster(
+        cluster = risk_cluster(
             Workload(
                 name="web",
                 resources=Resources(1000, 256),
@@ -1553,7 +1590,7 @@ class TestCpuContention:
         # Same pods, web peaking at 2000m: still twice its request, but
         # 2000 + 1000 fits inside 4000m. Contention is a property of the node,
         # not of the pod, and this is what makes that assertable.
-        cluster = contention_cluster(
+        cluster = risk_cluster(
             Workload(
                 name="web",
                 resources=Resources(1000, 256),
@@ -1579,7 +1616,7 @@ class TestCpuContention:
         # proportional share is 2000m -- four times what it reserved. web's
         # 700m limit is what it can actually use, so the bound stops there;
         # batch, unlimited, keeps the full share.
-        cluster = contention_cluster(
+        cluster = risk_cluster(
             Workload(
                 name="web",
                 resources=Resources(500, 256, cpu_limit_m=700),
@@ -1604,7 +1641,7 @@ class TestCpuContention:
         # neighbor (node requests total 4000m, share 500m), one beside a 2500m
         # neighbor (total 3000m, share 666m). The bound is a worst case, so the
         # tighter node decides.
-        cluster = contention_cluster(
+        cluster = risk_cluster(
             Workload(
                 name="big",
                 resources=Resources(3500, 256),
@@ -1693,7 +1730,7 @@ class TestCpuContention:
         # Five web replicas: one shares a node with the hog and is exposed, four
         # share a node with each other and are not. The flag is aggregated per
         # workload, so it has to say which fraction is affected.
-        cluster = contention_cluster(
+        cluster = risk_cluster(
             Workload(
                 name="hog",
                 resources=Resources(3500, 256),
@@ -1717,7 +1754,7 @@ class TestCpuContention:
         assert "1 of 5 replicas shares a contended node" in web.message
 
     def test_a_missing_peak_falls_back_to_avg_and_says_so(self) -> None:
-        cluster = contention_cluster(
+        cluster = risk_cluster(
             Workload(
                 name="web",
                 resources=Resources(1000, 256),
@@ -1750,7 +1787,7 @@ class TestCpuContention:
         # contention nor fabricate it: batch is credited with the 1000m it
         # reserved, which is enough to tip the node, and it is never flagged
         # because nothing observed it above that.
-        cluster = contention_cluster(
+        cluster = risk_cluster(
             Workload(
                 name="web",
                 resources=Resources(1000, 256),
@@ -1778,7 +1815,7 @@ class TestCpuContention:
         # from pod contributions, and a container's usage is already inside its
         # pod's figure.
         def cluster_for(containers: tuple[ContainerInfo, ...] | None) -> ClusterConfig:
-            return contention_cluster(
+            return risk_cluster(
                 Workload(
                     name="payments",
                     resources=Resources(1000, 256),
@@ -1841,7 +1878,7 @@ class TestCpuContention:
         # usage is already inside its pod's figure, so counting it again would
         # invent load: here the two containers would double the node's reading
         # and tip a node that genuinely fits.
-        cluster = contention_cluster(
+        cluster = risk_cluster(
             Workload(
                 name="web",
                 resources=Resources(1000, 256),
@@ -1878,7 +1915,7 @@ class TestCpuContention:
     def test_a_breakdown_without_usage_falls_back_to_the_pod_reading(self) -> None:
         # Present-but-usage-less says nothing a container comparison could use,
         # so it degrades to pod-level exactly as an absent list does.
-        cluster = contention_cluster(
+        cluster = risk_cluster(
             Workload(
                 name="web",
                 resources=Resources(1000, 256),
@@ -1915,7 +1952,7 @@ class TestCpuContention:
         contended and flagged by nothing, and would mean that adding a breakdown
         *removes* a flag pod-level analysis had already raised.
         """
-        cluster = contention_cluster(
+        cluster = risk_cluster(
             Workload(
                 name="web",
                 resources=Resources(1000, 256),
@@ -1988,7 +2025,7 @@ class TestCpuContention:
         ]
 
         for containers in breakdowns:
-            cluster = contention_cluster(
+            cluster = risk_cluster(
                 replace(borrower, containers=containers),
                 Workload(
                     name="batch",
@@ -2019,7 +2056,7 @@ class TestCpuContention:
         from the same metrics, and the editor drops the breakdown on a pod edit
         -- but the API accepts it, so its output must not lie.
         """
-        cluster = contention_cluster(
+        cluster = risk_cluster(
             Workload(
                 name="web",
                 resources=Resources(1000, 256),
@@ -2055,7 +2092,7 @@ class TestCpuContention:
         # breakdown is deliberately not cross-checked against the pod totals,
         # since those are effective requests. The raw ratio would report 30x the
         # machine here, which is not a bound on anything.
-        cluster = contention_cluster(
+        cluster = risk_cluster(
             Workload(
                 name="web",
                 resources=Resources(100, 256),
@@ -2078,7 +2115,7 @@ class TestCpuContention:
     def test_a_p95_basis_reaches_both_the_message_and_the_note(self) -> None:
         # p95 is file-only in the UI, so it is the basis least likely to be
         # exercised by hand and the easiest to leave unworded.
-        cluster = contention_cluster(
+        cluster = risk_cluster(
             Workload(
                 name="web",
                 resources=Resources(1000, 256),
@@ -2106,7 +2143,7 @@ class TestCpuContention:
     def test_both_kinds_of_note_can_fire_at_once(self) -> None:
         # The §4 bar is at most two lines, and this is the shape that reaches
         # it: one workload measured but without a peak, one not measured at all.
-        cluster = contention_cluster(
+        cluster = risk_cluster(
             Workload(
                 name="web",
                 resources=Resources(1000, 256),
@@ -2138,7 +2175,7 @@ class TestCpuContention:
         and a rule that silenced the units with *no* floor would hide the most
         exposed shape on the node. The magnitude is in the row for the reader.
         """
-        cluster = contention_cluster(
+        cluster = risk_cluster(
             Workload(
                 name="web",
                 resources=Resources(1000, 256),
@@ -2175,7 +2212,7 @@ class TestCpuContention:
         # Sorted by workload, then container, rather than emitted in placement
         # order: the same workload has to be findable in the same place when the
         # operator moves between scenario tabs.
-        cluster = contention_cluster(
+        cluster = risk_cluster(
             Workload(
                 name="zeta",
                 resources=Resources(1000, 256),
@@ -2209,7 +2246,7 @@ class TestCpuContention:
     def test_a_pool_that_placed_nothing_reports_no_contention(self) -> None:
         # No node was opened, so there is no node that could be contended --
         # distinct from an all-clear, which is a node that was checked.
-        cluster = contention_cluster(
+        cluster = risk_cluster(
             Workload(
                 name="web",
                 resources=Resources(1000, 256),
@@ -2226,7 +2263,7 @@ class TestCpuContention:
         # Oversized pods are excluded from packing entirely, so they sit on no
         # NodeAllocation and cannot tip one -- even at a peak far past the
         # machine. The pool still has a packed node, from the pods that fit.
-        cluster = contention_cluster(
+        cluster = risk_cluster(
             Workload(
                 name="huge",
                 resources=Resources(9000, 256),
@@ -2279,6 +2316,325 @@ class TestCpuContention:
         # 3500m against 3000m of allocatable, not against the machine's 4000m.
         assert contention.contended_node_count == 1
         assert contention.flags[0].worst_case_share_m == 3000
+
+
+def exposure_of(cluster: ClusterConfig, **replicas: int) -> LimitExposure:
+    """The default pool's limit exposure for one hand-chosen replica set."""
+    exposure = (
+        evaluate_scenario("current", cluster, replicas).pools["default"].limit_exposure
+    )
+    assert exposure is not None, "the pool placed no pods"
+    return exposure
+
+
+class TestLimitExposure:
+    """What the packed nodes look like if every pod grows to its declared ceiling.
+
+    Requests decided the packing; these numbers ask the incompressible question
+    the packing does not answer. A node whose memory ceilings outrun its
+    allocatable memory can be exhausted by pods that never once misbehave.
+    """
+
+    def test_ceilings_past_allocatable_make_the_node_exhaustible(self) -> None:
+        # 8000 + 4165 = 12165MiB of ceiling against 8192MiB of allocatable
+        # memory, and both pods fit one node on their far smaller requests --
+        # which is the whole point: the packing is safe and the ceilings are not.
+        cluster = risk_cluster(
+            Workload(
+                name="web",
+                resources=Resources(500, 1024, memory_limit_mib=8000),
+                current_replicas=1,
+            ),
+            Workload(
+                name="batch",
+                resources=Resources(500, 1024, memory_limit_mib=4165),
+                current_replicas=1,
+            ),
+        )
+
+        exposure = exposure_of(cluster, web=1, batch=1)
+
+        assert exposure.nodes_evaluated == 1
+        assert exposure.memory_exhaustible_node_count == 1
+        assert exposure.memory_max_limit_percent == 148.5
+        assert exposure.memory_unlimited_pod_count == 0
+        # Nothing here declares a CPU ceiling, so there is no ratio to report.
+        assert exposure.cpu_max_limit_percent is None
+        assert exposure.flags == (
+            "Memory ceilings on the most exposed node reach 148.5% of allocatable — "
+            "1 of 1 node can be exhausted by pods behaving within their limits.",
+        )
+
+    def test_a_pool_inside_its_ceilings_flags_nothing(self) -> None:
+        # The same two pods at 2048MiB each: 4096 of 8192, half the node.
+        cluster = risk_cluster(
+            Workload(
+                name="web",
+                resources=Resources(500, 1024, memory_limit_mib=2048),
+                current_replicas=1,
+            ),
+            Workload(
+                name="batch",
+                resources=Resources(500, 1024, memory_limit_mib=2048),
+                current_replicas=1,
+            ),
+        )
+
+        exposure = exposure_of(cluster, web=1, batch=1)
+
+        assert exposure.memory_exhaustible_node_count == 0
+        assert exposure.memory_max_limit_percent == 50.0
+        assert exposure.flags == ()
+
+    def test_a_node_at_exactly_its_allocatable_is_not_exhaustible(self) -> None:
+        # 4096 + 4096 = 8192MiB, the node exactly. Every pod can reach its
+        # ceiling at once and the node still holds, so this is the boundary the
+        # exhaustible count sits on.
+        cluster = risk_cluster(
+            Workload(
+                name="web",
+                resources=Resources(500, 1024, memory_limit_mib=4096),
+                current_replicas=1,
+            ),
+            Workload(
+                name="batch",
+                resources=Resources(500, 1024, memory_limit_mib=4096),
+                current_replicas=1,
+            ),
+        )
+
+        exposure = exposure_of(cluster, web=1, batch=1)
+
+        assert exposure.memory_max_limit_percent == 100.0
+        assert exposure.memory_exhaustible_node_count == 0
+        assert exposure.flags == ()
+
+    def test_an_unlimited_pod_counts_as_the_whole_node(self) -> None:
+        # batch declares no memory ceiling, so nothing it declared stops it from
+        # taking all 8192MiB: 2048 + 8192 = 10240, a quarter over the node. The
+        # count is reported on its own because the percentage cannot say how
+        # many pods put it there.
+        cluster = risk_cluster(
+            Workload(
+                name="web",
+                resources=Resources(500, 1024, memory_limit_mib=2048),
+                current_replicas=1,
+            ),
+            Workload(
+                name="batch",
+                resources=Resources(500, 1024),
+                current_replicas=1,
+            ),
+        )
+
+        exposure = exposure_of(cluster, web=1, batch=1)
+
+        assert exposure.memory_exhaustible_node_count == 1
+        assert exposure.memory_max_limit_percent == 125.0
+        assert exposure.memory_unlimited_pod_count == 1
+        assert exposure.flags == (
+            "Memory ceilings on the most exposed node reach 125% of allocatable — "
+            "1 of 1 node can be exhausted by pods behaving within their limits.",
+            "1 pod carries no memory limit; it can claim its whole node, so "
+            "any node it shares can be exhausted.",
+        )
+
+    def test_the_percentages_are_the_worst_node_not_the_first_or_the_average(
+        self,
+    ) -> None:
+        """Both maxima are taken over the nodes, and neither is node one.
+
+        big's 3000m request leaves 1000m on node one, so small's 1500m opens a
+        second. The ceilings are deliberately the other way round from the
+        requests: node one carries 1024MiB and 3000m, node two 9000MiB and
+        3900m, so a reading that kept the first node visited -- which
+        first-fit-decreasing normally makes the fullest one -- reports 12.5%
+        and 75% instead of 109.9% and 97.5%. Averaging the nodes would report
+        61.2% and 86.3%, which is neither.
+        """
+        cluster = risk_cluster(
+            Workload(
+                name="big",
+                resources=Resources(
+                    3000, 1024, cpu_limit_m=3000, memory_limit_mib=1024
+                ),
+                current_replicas=1,
+            ),
+            Workload(
+                name="small",
+                resources=Resources(
+                    1500, 1024, cpu_limit_m=3900, memory_limit_mib=9000
+                ),
+                current_replicas=1,
+            ),
+        )
+
+        exposure = exposure_of(cluster, big=1, small=1)
+
+        assert exposure.nodes_evaluated == 2
+        assert exposure.memory_exhaustible_node_count == 1
+        assert exposure.memory_max_limit_percent == 109.9
+        assert exposure.cpu_max_limit_percent == 97.5
+        assert exposure.flags == (
+            "Memory ceilings on the most exposed node reach 109.9% of allocatable — "
+            "1 of 2 nodes can be exhausted by pods behaving within their limits.",
+        )
+
+    def test_a_node_one_mib_over_never_reports_a_flat_100_percent(self) -> None:
+        """The percentage may not contradict the count it is printed beside.
+
+        Exhaustibility is settled in whole MiB, so 8193MiB against 8192 is a
+        node that can be exhausted -- while the true 100.0122% rounds to a flat
+        100.0, which the schema and the sentence beside it both say is safe. The
+        figure is kept on the correct side of the line instead.
+        """
+        over = risk_cluster(
+            Workload(
+                name="web",
+                resources=Resources(500, 1024, memory_limit_mib=4097),
+                current_replicas=1,
+            ),
+            Workload(
+                name="batch",
+                resources=Resources(500, 1024, memory_limit_mib=4096),
+                current_replicas=1,
+            ),
+        )
+        under = risk_cluster(
+            Workload(
+                name="web",
+                resources=Resources(500, 1024, memory_limit_mib=4095),
+                current_replicas=1,
+            ),
+            Workload(
+                name="batch",
+                resources=Resources(500, 1024, memory_limit_mib=4096),
+                current_replicas=1,
+            ),
+        )
+
+        exhaustible = exposure_of(over, web=1, batch=1)
+        assert exhaustible.memory_exhaustible_node_count == 1
+        assert exhaustible.memory_max_limit_percent > 100
+
+        safe = exposure_of(under, web=1, batch=1)
+        assert safe.memory_exhaustible_node_count == 0
+        assert safe.memory_max_limit_percent < 100
+
+    def test_an_unlimited_pod_alone_on_its_node_is_still_reported(self) -> None:
+        """The flag does not need a node count behind it.
+
+        A pod with no memory limit holding a node by itself substitutes exactly
+        the node's allocatable, so nothing is *over* and the exhaustible count
+        stays 0 -- while the pod can still take everything the node has. The
+        flag is what carries that, which is why the readout takes its state from
+        the flags rather than from the count.
+        """
+        cluster = risk_cluster(
+            Workload(
+                name="web",
+                resources=Resources(3000, 6000),
+                current_replicas=1,
+            ),
+        )
+
+        exposure = exposure_of(cluster, web=1)
+
+        assert exposure.memory_exhaustible_node_count == 0
+        assert exposure.memory_max_limit_percent == 100.0
+        assert exposure.memory_unlimited_pod_count == 1
+        assert exposure.flags == (
+            "1 pod carries no memory limit; it can claim its whole node, so "
+            "any node it shares can be exhausted.",
+        )
+
+    def test_more_replicas_at_the_hpa_maximum_can_flip_a_pool(self) -> None:
+        """Exposure is recomputed per scenario, because the packing is.
+
+        One replica leaves a 5000MiB ceiling on an 8192MiB node. Two of them
+        share that node -- 2048MiB of request each fits easily -- and together
+        declare 10000MiB. Nothing about the workload changed; the scenario did.
+        """
+        cluster = risk_cluster(
+            Workload(
+                name="web",
+                resources=Resources(500, 2048, memory_limit_mib=5000),
+                current_replicas=1,
+                observed_cpu_per_pod=UsageStat(avg=100),
+                hpa=HPA(min_replicas=1, max_replicas=2, cpu_target_percentage=70),
+            ),
+        )
+
+        pools = {
+            name: scenario.pools["default"]
+            for name, scenario in evaluate(cluster).scenarios.items()
+        }
+        current = pools["current"].limit_exposure
+        at_max = pools["hpa_max"].limit_exposure
+        assert current is not None and at_max is not None
+
+        assert (current.memory_exhaustible_node_count, current.flags) == (0, ())
+        assert at_max.memory_exhaustible_node_count == 1
+        assert at_max.memory_max_limit_percent == 122.1
+
+    def test_cpu_overcommit_is_reported_and_never_flags(self) -> None:
+        """The CPU ratio is declared ceilings only, and never a finding.
+
+        web declares 6000m against 4000m of allocatable, batch declares nothing.
+        A pod without a CPU limit adds nothing to this sum -- substituting the
+        node for it, as memory does, would add a flat 100% per limitless pod and
+        turn an overcommit ratio into a pod count. Memory here is comfortably
+        inside its ceilings, and the flags stay empty either way: CPU throttles
+        where memory kills, so the ratio is context and not a finding.
+        """
+        cluster = risk_cluster(
+            Workload(
+                name="web",
+                resources=Resources(500, 1024, cpu_limit_m=6000, memory_limit_mib=2048),
+                current_replicas=1,
+            ),
+            Workload(
+                name="batch",
+                resources=Resources(500, 1024, memory_limit_mib=2048),
+                current_replicas=1,
+            ),
+        )
+
+        exposure = exposure_of(cluster, web=1, batch=1)
+
+        assert exposure.cpu_max_limit_percent == 150.0
+        assert exposure.flags == ()
+
+    def test_no_cpu_limit_anywhere_withholds_the_ratio(self) -> None:
+        # A sum with no declaration behind it would report 0%, which reads as a
+        # finding of its own rather than as an absence.
+        cluster = risk_cluster(
+            Workload(
+                name="web",
+                resources=Resources(500, 1024, memory_limit_mib=2048),
+                current_replicas=1,
+            ),
+        )
+
+        assert exposure_of(cluster, web=1).cpu_max_limit_percent is None
+
+    def test_a_pool_that_packed_no_nodes_reports_nothing(self) -> None:
+        # Null is not an all-clear: with no node opened there was nothing to
+        # examine, and an empty flags list would claim otherwise.
+        cluster = risk_cluster(
+            Workload(
+                name="web",
+                resources=Resources(500, 1024, memory_limit_mib=2048),
+                current_replicas=0,
+            ),
+        )
+
+        assert (
+            evaluate_scenario("current", cluster, {"web": 0})
+            .pools["default"]
+            .limit_exposure
+            is None
+        )
 
 
 class TestRolloutAbsoluteSurge:

@@ -324,6 +324,54 @@ export type HpaSchema = {
 };
 
 /**
+ * LimitExposureSchema
+ *
+ * How far one pool's packed nodes can be driven by declared limits alone.
+ *
+ * Contention asks what happens when neighbors compete for a compressible
+ * resource. This asks the incompressible question: if every pod on a node
+ * grew to the ceiling it declared, would the node survive it?
+ */
+export type LimitExposureSchema = {
+    /**
+     * Cpu Max Limit Percent
+     *
+     * The worst node's declared CPU limits as a percentage of its allocatable CPU, and informational only — CPU compresses, so an overcommitted node throttles rather than kills. A pod without a CPU limit adds nothing here, unlike its memory counterpart: it cannot exhaust anything, and substituting the node for it would turn the ratio into a pod count. Null when nothing declares a CPU limit at all.
+     */
+    cpu_max_limit_percent: number | null;
+    /**
+     * Flags
+     *
+     * Zero to two plain sentences, composed by the engine so every consumer reports exposure identically. Empty means no node here can be exhausted by pods behaving within their limits.
+     */
+    flags: Array<string>;
+    /**
+     * Memory Exhaustible Node Count
+     *
+     * Nodes whose placed pods' memory limits — a pod with none counting as the whole node — outrun allocatable memory. Such a node can be exhausted by pods that never exceed what they declared.
+     */
+    memory_exhaustible_node_count: number;
+    /**
+     * Memory Max Limit Percent
+     *
+     * The worst node's memory ceilings as a percentage of its allocatable memory. Above 100 means that node is exhaustible — exhaustibility is settled in whole MiB, and this figure is kept on the matching side of 100 rather than rounded to the nearest tenth.
+     */
+    memory_max_limit_percent: number;
+    /**
+     * Memory Unlimited Pod Count
+     *
+     * Placed pods with no memory limit. Reported on its own because each substitutes a whole node into the percentage above, which is true but drowns it: one such pod beside anything else already exceeds 100%.
+     */
+    memory_unlimited_pod_count: number;
+    /**
+     * Nodes Evaluated
+     *
+     * Nodes the packer opened for this pool. Fewer than the pool's node count when min_nodes exceeds demand.
+     */
+    nodes_evaluated: number;
+};
+
+/**
  * MachineSpecSchema
  */
 export type MachineSpecSchema = {
@@ -412,6 +460,10 @@ export type PoolScenarioResultSchema = {
      * Fragmentation Resource
      */
     fragmentation_resource: string | null;
+    /**
+     * Runtime exhaustion risk read off this pool's packing. Null on the same condition as cpu_contention: the packer opened no nodes, so there is none to exhaust. Additive context, never a verdict.
+     */
+    limit_exposure: LimitExposureSchema | null;
     /**
      * Limiting Resource
      */

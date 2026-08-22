@@ -21,13 +21,23 @@ Keep assumptions visible. Never present an approximation as Kubernetes parity.
   editor shares with the engine; `caAction.ts` maps the engine's node deltas to the
   results panel's CA-action readout; `usage.ts` keeps an edited observed-usage
   summary within the engine's ordering rules; `breakdown.ts` drops a per-container
-  breakdown the pod-level editor has just contradicted; `contention.ts` reads the
-  engine's CPU-contention block for the Runtime risk section; `components/` and
-  `App.tsx` are the React UI. Keep `api.ts`, `breakdown.ts`, `caAction.ts`,
-  `contention.ts`, `defaults.ts`, `importers.ts`, `surge.ts`, and `usage.ts`
-  independent of UI modules — the
-  `core-does-not-import-ui` rule in `frontend/dependency-cruiser.config.mjs`
-  enforces this list.
+  breakdown the pod-level editor has just contradicted; `contention.ts` and
+  `exposure.ts` read the engine's CPU-contention and node-limit-exposure blocks
+  for the Runtime risk section; `format.ts` prints millicores and MiB as an
+  operator reads them; `components/` and
+  `App.tsx` are the React UI. Every plain `.ts` at the root of `frontend/src/`
+  is core and may not import a React module; the `core-does-not-import-ui` rule
+  in `frontend/dependency-cruiser.config.mjs` enforces that by pattern rather
+  than by a list, so a new one is covered the moment it exists.
+- `frontend/src/components/` holds every React module that is not `App.tsx`,
+  plus helpers private to them (`clipboard.ts`/`download.ts` for the modals,
+  `fieldValue.ts` for `Fields.tsx`). Reusability is not the criterion — a
+  one-off panel section belongs there beside a generic `Modal`. A helper
+  imported from outside that directory belongs one level up in `src/` instead.
+  A results-panel section moves out of `App.tsx` once it owns bindings — hooks,
+  memos, derived readouts — that no sibling section reads; a section that only
+  reads `ResultsPanel`'s shared bindings stays inline, because extracting it
+  would mean passing those same bindings back down as props.
 - `frontend/src/generated/` comes from FastAPI OpenAPI; never hand-edit it.
 - `frontend/e2e/` is the Playwright suite for scenarios promoted out of
   `docs/ui-regression-scenarios.md`. It drives the built UI from outside and imports

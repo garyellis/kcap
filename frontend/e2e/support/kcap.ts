@@ -190,6 +190,39 @@ export class Kcap {
     return tile.replace(/\s+/g, ' ').replace(/^CA action /, '').trim()
   }
 
+  // --- runtime risk ---------------------------------------------------------
+
+  /**
+   * The Runtime risk section of the results panel.
+   *
+   * A landmark named by its own visible heading — the section had no accessible
+   * name until this suite needed one, which is a real gap for anyone navigating
+   * by region, so it was fixed with `aria-labelledby` rather than a test id.
+   */
+  get runtimeRisk(): Locator {
+    return this.page.getByRole('region', { name: 'Runtime risk' })
+  }
+
+  /**
+   * One finding chip, addressed by the class it reports: `Borrowed CPU`,
+   * `Node exhaustible`, `Unlimited memory`. The chip carries a live count, so
+   * the match is anchored at the label — and the text engine returns the
+   * deepest match, which is the chip rather than the summary around it.
+   */
+  riskChip(label: string): Locator {
+    return this.runtimeRisk.getByText(startingWith(label))
+  }
+
+  /** Open a finding's panel. Native `<details>`, so clicking the chip is the whole gesture. */
+  async expandRisk(label: string): Promise<void> {
+    await this.riskChip(label).click()
+  }
+
+  /** One row of the contention table, addressed by the workload it names. */
+  contentionRow(workload: string): Locator {
+    return this.runtimeRisk.getByRole('row').filter({ hasText: workload })
+  }
+
   // --- import and export ----------------------------------------------------
 
   async openImport(): Promise<void> {

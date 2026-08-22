@@ -415,13 +415,25 @@
 .projection-row b { color: var(--text-3); font: 450 12px var(--font-mono); font-variant-numeric: tabular-nums; }
 .projection-row strong { color: var(--ink); font: 600 13px var(--font-mono); font-variant-numeric: tabular-nums; }
 
-/* ---------- Runtime risk (contention flags + limit sums) ---------- */
+/* ---------- Runtime risk (contention + exhaustion findings, limit sums) ---------- */
 
 .runtime-risk { padding: 18px 20px; }
 /* Every line under the heading is muted informational prose: the all-clear, the
-   engine's basis notes, the container caveat, and the section caption. Warn tone
-   belongs to the chip alone — nothing here is red on arrival. */
+   engine's basis notes, the container caveat, the CPU overcommit ratio inside an
+   expansion, and the section caption. Warn tone belongs to the chip alone —
+   nothing here is red on arrival. */
 .risk-note { margin: 10px 0 0; color: var(--text-3); font-size: 12px; line-height: 1.55; }
+/* One chip per finding class, side by side while collapsed. An opened panel
+   claims the whole row, so its table or prose is never squeezed into the width
+   left over by the chip beside it. */
+.risk-chips { display: flex; flex-wrap: wrap; gap: 10px 16px; }
+.risk-chips > .risk-detail { flex: 0 1 auto; }
+/* `min-width` only once open, where the table inside needs the flex item to be
+   allowed to shrink so its own `overflow-x` can take over. On a collapsed chip
+   it would instead let the nowrap chip overflow its own box. */
+.risk-chips > .risk-detail[open] { flex-basis: 100%; min-width: 0; }
+.risk-flags { margin: 12px 0 0; padding-left: 17px; color: var(--text-2); font-size: 12px; line-height: 1.55; }
+.risk-flags li + li { margin-top: 6px; }
 .risk-detail > summary { display: flex; align-items: center; flex-wrap: wrap; gap: 4px 9px; cursor: pointer; list-style: none; }
 .risk-detail > summary::-webkit-details-marker { display: none; }
 .risk-detail > summary::before { content: '▸' / ''; order: -1; color: var(--text-3); font-size: 10px; }

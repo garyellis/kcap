@@ -11,7 +11,7 @@ const CHECKLIST = new URL('../../../docs/ui-regression-scenarios.md', import.met
  * automate now tests something else. Renaming or reformatting the doc's fixture
  * section fails loudly here, which is the correct outcome.
  */
-export function checklistFixture(id: 'F1' | 'F2' | 'F3' | 'F4'): string {
+export function checklistFixture(id: 'F1' | 'F2' | 'F3' | 'F4' | 'F5'): string {
   const markdown = readFileSync(CHECKLIST, 'utf8')
 
   const heading = markdown.indexOf(`\n### ${id} —`)

@@ -18,11 +18,11 @@ A scenario is **promoted** to `frontend/e2e/` once its expectation is settled, s
 cannot silently rot between passes. Promotion is an anti-rot guard for decisions already
 made — it is not a discovery tool, and it does not retire the manual walk.
 
-Every row carries exactly one status. Twelve are **Automated**, naming their spec file and
+Every row carries exactly one status. Fourteen are **Automated**, naming their spec file and
 keeping a separate **Last walked manually** date that CI never touches. Six are **manual
-only**, each saying why automating it would be worse than not. Two are **not yet
-promoted** — both carry an expectation P2.3 has just written or just changed, and wait one
-session for it to settle.
+only**, each saying why automating it would be worse than not. One is **not yet
+promoted** — it carries an expectation P3.3 has just written, and waits one session for it to
+settle.
 
 ```bash
 mise run e2e      # the promoted scenarios, on a build the suite makes itself
@@ -133,10 +133,10 @@ what P2.3 gave the peak a readout for: (a) rewrites the basis note from `2 workl
 so it reads the peak without any node number reading it. No 422 anywhere. Setting a peak back to `0`
 clears the measurement.
 **Origin:** P1.3 (Session E), expectation extended by P2.3 (Session H) ·
-**Not yet promoted** — was eligible, and is deliberately held back one more session: P2.3 has
-just changed what this scenario expects, and the promotion rule is that a test guards a settled
-decision, not a fresh one. · **Last verified:** 2026-08-21 (Session H, walked end to end for the
-first time — the peak now has a readout to check it against)
+**Automated:** `frontend/e2e/observed-usage.spec.ts` — the three edits and the ordering
+`usage.ts` enforces, plus the invariance of every projected number across (a) and (b) ·
+**Last walked manually:** 2026-08-21 (Session H, walked end to end for the first time — the peak
+now has a readout to check it against)
 
 ---
 
@@ -280,8 +280,8 @@ results panel, on the `Desired` tab the app opens on — every number below is t
 Expand the chip. (c) Reset, then set **CPU request** to `8000` on both `api` and `worker`.
 (d) Reset and import fixture **F5** with `Replace configuration`, then expand the chip.
 **Expect:**
-- (a) one neutral line, `No CPU contention detected on this packing.`, and one muted line
-  beneath it — the engine's basis note, `Peak unavailable for 2 workloads — avg used;
+- (a) one neutral line, `No contention or exhaustion detected on this packing.`, and one muted
+  line beneath it — the engine's basis note, `Peak unavailable for 2 workloads — avg used;
   contention here is a lower bound.` No chip, no colour. Below them the section still carries the
   two limit tiles (`CPU runtime limit`, `Memory runtime limit`), which P2.3 moved into it, and now
   ends with the swapped caption `Requests alone drive placement; limits and usage drive the
@@ -289,7 +289,8 @@ Expand the chip. (c) Reset, then set **CPU request** to `8000` on both `api` and
 - (b) a warn-tone chip reading `BORROWED CPU · 1 WORKLOAD` — the app's chips are uppercased in
   CSS — with `2 of 3 packed nodes contended` beside it. Every projected number is unchanged from (a): the five scenario tabs, `Capacity
   clear`, `CA action −3`, `Placement 3`, and the baseline/candidate strip at `+0`. Expanded, one
-  row: `api`, container `—`, request `750m`, usage `2000m peak`, `8 of 8` replicas, and `771m`
+  row: `api`, container `whole pod`, request `750m`, usage `2000m peak`, `8 of 8` replicas, and
+  `771m`
   under a column headed exactly `worst case (bound)`. Hovering the row shows the engine's own
   sentence, which the panel never rewrites; it is a hover only, and deliberately carries no number
   the columns do not already show.
@@ -298,16 +299,56 @@ Expand the chip. (c) Reset, then set **CPU request** to `8000` on both `api` and
 - (d) the chip still reads `1 WORKLOAD` while the table has **two** rows — flags are per
   (workload, container), and the chip counts workloads. `app` reads `500m` / `1700m peak` /
   `514m`; `istio-proxy` reads `19m` / `300m peak` / `19m`. A further muted line appears above the
-  basis note: `Rows name only the containers the import listed; a pod may be borrowing more than
-  its rows account for.` It is absent in (b), where the flag is pod-level and carries the whole
-  pod's excess already.
-**Origin:** P2.3 (Session H) · **Not yet promoted** — eligible next session, once the wording
-has survived a review. Whoever promotes it must widen `checklistFixture`'s fixture union in
-`frontend/e2e/support/checklist.ts` to include `'F5'`; the fence itself already parses the way
-that reader expects. The caveat line in (d) is an owner decision taken this
-session, and the three-state distinction is the whole point of the row, so a test written today
-would freeze prose still one review away from settled. · **Last verified:** 2026-08-21
-(Session H)
+  basis note: `Container rows name only the containers the import listed; a pod may be borrowing
+  more than its rows account for.` It is absent in (b), where the flag is pod-level and carries
+  the whole pod's excess already.
+**Origin:** P2.3 (Session H), all-clear sentence widened and the container cell reworded by
+P3.3 (Session I) ·
+**Automated:** `frontend/e2e/runtime-risk.spec.ts` — the three states, the workload-vs-flag
+count, and the caveat line. The container cell's own wording is deliberately not asserted:
+`whole pod` was written this session and a test would freeze it a session early, so the test
+reads the row by its workload and numbers instead ·
+**Last walked manually:** 2026-08-21 (Session I, all four steps — the all-clear sentence and
+the container cell both changed here)
+
+---
+
+### R21 — Node exhaustion is read off declared limits, and moves no node number
+**Pins:** P3.1–P3.3. Memory limits were inert before this; now they set a ceiling per packed
+node, and `limit_exposure` carries the same three states `cpu_contention` does. Two traps:
+`null` is "nothing was packed", not an all-clear, and the finding must be read off the engine's
+flags rather than off the exhaustible node count — a pod with no memory limit alone on its node
+claims exactly the node and no more, so the count stays 0 while the flag is real. The section is
+additive context: no ceiling may move a node number.
+**Steps:** (a) load the default configuration and read the **Runtime risk** section on the
+`Desired` tab the app opens on. (b) Select `api`, set **Memory limit value** to `4096`, blur,
+and expand the chip. (c) Reset. Select `api`, turn its **Memory limit** toggle off and set
+**CPU request** to `3000`; select `worker` and set **Current replicas** to `0`; select the
+`Current` tab and expand the chip.
+**Expect:**
+- (a) the neutral line `No contention or exhaustion detected on this packing.` — the wider
+  sentence, now that exhaustion is something kcap actually checked. No chip.
+- (b) a warn-tone chip `NODE EXHAUSTIBLE · 2 OF 3 NODES` — chips are uppercased in CSS — with
+  `memory ceilings reach 120.7% of allocatable on the most exposed node` beside it. Every
+  projected number is unchanged from (a): the five scenario tabs (`5 / 10 / 12 / 30 / 38` pods),
+  `Capacity clear`, `CA action −3`, `Placement 3`, `Headroom 17`, and the strip at `+0`. The one
+  number that moves is the `Memory runtime limit` tile, `22 GiB` → `38 GiB`, which is the sum of
+  the limits themselves. Expanded: prose, not a table — the engine's sentence `Memory ceilings
+  on the most exposed node reach 120.7% of allocatable — 2 of 3 nodes can be exhausted by pods
+  behaving within their limits.`, then a muted `CPU limits reach 263.9% of allocatable on the
+  most overcommitted node. CPU is compressible, so such a node throttles rather than runs out.`
+  The CPU ratio never gets a chip of its own — and note it is only ever printed beside a memory
+  finding, so a pool that is CPU-overcommitted and memory-clear reads as an all-clear.
+- (c) the chip reads `UNLIMITED MEMORY · 6 PODS` with `memory ceilings reach 100% of allocatable
+  on the most exposed node`. This is the state a node-count chip would misreport: at 3000m per
+  pod one pod holds a node alone, so no node is *over* its allocatable and `0 of 6 nodes` would
+  be the reading. Expanded: `6 pods carry no memory limit; each can claim its whole node, so any
+  node they share can be exhausted.`, then the CPU line at `83.3%` — the request edit raised the
+  CPU limit with it, so the ratio is still reported. The `Memory runtime limit` tile reads
+  `Unbounded`.
+**Origin:** P3.3 (Session I) · **Not yet promoted** — written this session; the chip's second
+label in (c) in particular is a decision one session old. · **Last verified:** 2026-08-21
+(Session I)
 
 ---
 

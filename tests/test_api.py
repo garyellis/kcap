@@ -173,9 +173,66 @@ def test_evaluate_withholds_a_scale_down_with_no_placeable_demand(
     assert pool["nodes_to_remove"] == 0
     assert pool["scale_down_blocked_reason"] == "no_placeable_demand"
     assert pool["current_nodes"] - pool["effective_nodes_required"] == 2
-    # No node was packed, so there is nothing that could be contended. Null is
-    # distinct from an all-clear block, which reports a node that was checked.
+    # No node was packed, so there is nothing that could be contended or
+    # exhausted. Null is distinct from an all-clear block, which reports a node
+    # that was checked.
     assert pool["cpu_contention"] is None
+    assert pool["limit_exposure"] is None
+
+
+def test_evaluate_reports_limit_exposure(
+    client: TestClient,
+    cluster_payload: dict[str, Any],
+) -> None:
+    response = client.post("/v1/evaluate", json=cluster_payload)
+
+    assert response.status_code == 200
+    exposure = response.json()["scenarios"]["current"]["pools"]["default"][
+        "limit_exposure"
+    ]
+    # Four api pods on the fixture's one node, against 7680MiB and 3800m of
+    # allocatable. Their memory ceilings come to 2048MiB, a quarter of the node,
+    # so nothing can be exhausted here; their CPU ceilings come to 4000m, which
+    # is over the node and says so without ever being a finding.
+    assert exposure == {
+        "nodes_evaluated": 1,
+        "memory_exhaustible_node_count": 0,
+        "memory_max_limit_percent": 26.7,
+        "memory_unlimited_pod_count": 0,
+        "cpu_max_limit_percent": 105.3,
+        "flags": [],
+    }
+
+
+def test_evaluate_flags_a_node_its_pods_can_exhaust(
+    client: TestClient,
+    cluster_payload: dict[str, Any],
+) -> None:
+    # The same packing with the memory limit withdrawn. Nothing the pods
+    # declared now stops any one of them from taking the whole node, so each
+    # counts as the whole node: four of them against 7680MiB is 400%.
+    payload = deepcopy(cluster_payload)
+    payload["workloads"]["api"]["resources"]["memory_limit_mib"] = None
+
+    response = client.post("/v1/evaluate", json=payload)
+
+    assert response.status_code == 200
+    exposure = response.json()["scenarios"]["current"]["pools"]["default"][
+        "limit_exposure"
+    ]
+    assert exposure == {
+        "nodes_evaluated": 1,
+        "memory_exhaustible_node_count": 1,
+        "memory_max_limit_percent": 400.0,
+        "memory_unlimited_pod_count": 4,
+        "cpu_max_limit_percent": 105.3,
+        "flags": [
+            "Memory ceilings on the most exposed node reach 400% of allocatable — "
+            "1 of 1 node can be exhausted by pods behaving within their limits.",
+            "4 pods carry no memory limit; each can claim its whole node, so "
+            "any node they share can be exhausted.",
+        ],
+    }
 
 
 def test_evaluate_flags_a_pod_living_on_borrowed_cpu(

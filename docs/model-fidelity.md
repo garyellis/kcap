@@ -223,10 +223,24 @@ and only as good as the assignment.
 
 **Limits.** Imported and validated, and inert to sizing: no effect on placement, HPA math, or
 node counts. That matches the scheduler, which fits on requests — but a cluster safe by request
-and exhaustible by limit reads as safe. The one thing a limit does move is the runtime-risk
-readout: a CPU limit caps the worst-case share on a contention flag, because a container cannot
-use a share larger than its own ceiling. Memory limits are still read by nothing.
+and exhaustible by limit reads as safe — so both limits feed the runtime-risk readout. A CPU
+limit caps the worst-case share on a contention flag, because a container cannot use a share
+larger than its own ceiling; memory limits set the exhaustion ceiling below.
 `engine.py` `Resources` ⇄ [`fitsRequest`](https://github.com/kubernetes/kubernetes/blob/v1.33.0/pkg/scheduler/framework/plugins/noderesources/fit.go#L499)
+
+**Node exhaustion.** kcap sums the memory limits of each packed node's pods against its
+allocatable memory — a pod declaring none counts as the whole node — and reports the worst
+node's ratio. That is a statement about declarations, not about a moment: nothing here
+simulates what a node does when memory actually runs out. Upstream, a container reaching its
+own limit is OOM-killed by its cgroup with no node-level signal involved; separately, the
+kubelet evicts on live `memory.available` against its eviction thresholds, and the
+`oom_score_adj` it assigns is derived from each container's memory *request* against node
+capacity, not from the limit kcap sums here. So a real node picks a victim and kcap names none,
+and a ratio at or below 100% means the declarations cannot exhaust the node rather than that
+the node is safe. The DaemonSet reservation is on the other side of the arithmetic — it is
+deducted from allocatable rather than counted as a ceiling, so DaemonSet pods whose own limits
+exceed the configured reservation can exhaust a node kcap reports as clear.
+`engine.py` `_evaluate_limit_exposure` ⇄ [`synchronize`](https://github.com/kubernetes/kubernetes/blob/v1.33.0/pkg/kubelet/eviction/eviction_manager.go#L243), [`GetContainerOOMScoreAdjust`](https://github.com/kubernetes/kubernetes/blob/v1.33.0/pkg/kubelet/qos/policy.go#L45)
 
 ## Node capacity
 

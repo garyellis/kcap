@@ -23,4 +23,39 @@ test.describe('Baseline', () => {
     // posts the `observed_cpu_per_pod` summary, and since the Session E cleanup
     // that is the only form the API accepts at all.
   })
+
+  test('R16 — a peak can be entered, and cannot be entered below the average', async ({ kcap }) => {
+    await kcap.open()
+    await kcap.selectWorkload('api')
+
+    const peak = kcap.field('Peak CPU usage / pod')
+    const average = Number(await kcap.field('Average CPU usage / pod').inputValue())
+    // Read off the screen rather than hard-coded: the claim is the ordering the
+    // engine enforces, not the shipped default's 620.
+    expect(average, 'the fixture should carry an average to order the peak against').toBeGreaterThan(0)
+
+    const projection = async () => ({
+      desired: await kcap.podCount('Desired'),
+      caAction: await kcap.caAction(),
+    })
+    const before = await projection()
+
+    // Below the average, the peak snaps up to it. A maximum cannot sit under its
+    // own mean, and the engine returns that violation as a message-only 422 — so
+    // a UI that let it through would show an unexplained error banner.
+    await kcap.setField('Peak CPU usage / pod', Math.round(average / 2))
+    await expect(peak).toHaveValue(String(average))
+
+    // Above it, held exactly.
+    await kcap.setField('Peak CPU usage / pod', average * 2)
+    await expect(peak).toHaveValue(String(average * 2))
+
+    // Neither edit is a sizing input: the HPA reads the average and nothing else.
+    expect(await projection()).toEqual(before)
+
+    // An average that overtakes the peak carries the peak up with it, rather than
+    // stranding a measurement below its own mean.
+    await kcap.setField('Average CPU usage / pod', average * 3)
+    await expect(peak).toHaveValue(String(average * 3))
+  })
 })
