@@ -373,8 +373,19 @@ function WorkloadEditor({
           <NumberField label="Average memory usage / pod" sliderMax={8192} value={memoryUsage?.avg ?? 0} min={0} max={1048576} step={16} unit="MiB" onChange={(avg) => updateUsage('observed_memory_per_pod', withAvg(memoryUsage, avg))} hint="Feeds HPA" />
         </div>
         <div className="field-grid field-grid--four field-grid--continuation">
-          <NumberField label="Peak CPU usage / pod" sliderMax={4000} value={cpuUsage?.peak ?? 0} min={0} max={128000} step={10} unit="mCPU" onChange={(peak) => updateUsage('observed_cpu_per_pod', withPeak(cpuUsage, peak))} hint="Optional; 0 = not measured" />
-          <NumberField label="Peak memory usage / pod" sliderMax={8192} value={memoryUsage?.peak ?? 0} min={0} max={1048576} step={16} unit="MiB" onChange={(peak) => updateUsage('observed_memory_per_pod', withPeak(memoryUsage, peak))} hint="Optional; 0 = not measured" />
+          {/*
+            Both peak sliders offer positions the field will not keep: usage.ts
+            floors a peak at the higher of the average and an imported p95, so
+            the bottom of each track collapses onto one value and a thumb
+            dragged there looks stuck. The hint states that floor rather than
+            leaving it looking broken, and says "never below the average"
+            rather than naming a landing value, which the p95 case would make
+            wrong. Starting the track at the floor, or marking the floor on it,
+            were both weighed and rejected: 0 is how this field spells "not
+            measured", so the track has to keep reaching it.
+          */}
+          <NumberField label="Peak CPU usage / pod" sliderMax={4000} value={cpuUsage?.peak ?? 0} min={0} max={128000} step={10} unit="mCPU" onChange={(peak) => updateUsage('observed_cpu_per_pod', withPeak(cpuUsage, peak))} hint="Optional; 0 = not measured; never below the average" />
+          <NumberField label="Peak memory usage / pod" sliderMax={8192} value={memoryUsage?.peak ?? 0} min={0} max={1048576} step={16} unit="MiB" onChange={(peak) => updateUsage('observed_memory_per_pod', withPeak(memoryUsage, peak))} hint="Optional; 0 = not measured; never below the average" />
           <NumberField label="Rollout max surge" sliderMax={surgeMode === 'pods' ? 50 : 100} value={surgeMode === 'pods' ? surgePods ?? 0 : workload.rollout.max_surge_percent} min={0} max={surgeMode === 'pods' ? SURGE_PODS_MAX : SURGE_PERCENT_MAX} step={surgeMode === 'pods' ? 1 : 5} fractional={surgeMode === '%'} unit={surgeMode} unitOptions={SURGE_UNITS} onUnitChange={switchSurgeMode} onChange={(next) => updateRollout(surgeMode === 'pods' ? { max_surge_pods: next } : { max_surge_percent: next })} hint="Applied at HPA maximum" />
           {poolNames.length > 1 && (
             <label className="field">
