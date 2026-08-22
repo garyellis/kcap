@@ -1274,12 +1274,6 @@ class TestUsageStatistics:
         # stopping at it.
         assert UsageStat(avg=100, peak=240).exposure() == (240, "peak")
 
-    def test_sizing_prefers_p95_and_falls_back_to_average(self) -> None:
-        # Sizing never reads peak: a request bought for the maximum is idle
-        # capacity the scheduler cannot pack around.
-        assert UsageStat(avg=100, p95=180, peak=240).sizing() == 180
-        assert UsageStat(avg=100, peak=240).sizing() == 100
-
     def test_hpa_reads_the_average_and_ignores_the_other_statistics(self) -> None:
         # 400m against a 500m request is 80% utilization at a 70% target, which
         # scales 4 replicas to 5. Reading p95 or peak here would give 6 or 7.

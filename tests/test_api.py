@@ -404,8 +404,8 @@ def test_usage_statistics_beyond_the_average_do_not_move_the_hpa(
     client: TestClient,
     cluster_payload: dict[str, Any],
 ) -> None:
-    # p95 and peak are carried for the exposure and sizing questions; the
-    # replica math reads the average and nothing else.
+    # p95 and peak are carried for the exposure question; the replica math
+    # reads the average and nothing else.
     payload = deepcopy(cluster_payload)
     workload = payload["workloads"]["api"]
     workload["observed_cpu_per_pod"] = {

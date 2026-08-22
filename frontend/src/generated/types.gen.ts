@@ -661,8 +661,9 @@ export type ScenarioResultSchema = {
  *
  * Observed per-pod usage in one dimension, in that dimension's units.
  *
- * Which statistic is read is a convention: HPA math reads `avg`, sizing
- * suggestions read `p95`, and exposure/entitlement analysis reads `peak`.
+ * Which statistic is read is a convention: HPA math reads `avg`, and
+ * exposure/entitlement analysis reads the highest one available — `peak`,
+ * else `p95`, else `avg` — reporting which it fell back to.
  */
 export type UsageStatSchema = {
     /**

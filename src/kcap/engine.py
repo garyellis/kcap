@@ -29,8 +29,8 @@ class UsageStat:
     """A summary of one workload's observed per-pod usage in one dimension.
 
     Units follow the dimension: millicores for CPU, MiB for memory. Which
-    statistic a caller reads is a convention, not a preference — see the
-    accessors below and the field comments on `Workload`.
+    statistic a caller reads is a convention, not a preference — see
+    `exposure()` below and the field comments on `Workload`.
     """
 
     avg: int
@@ -49,15 +49,6 @@ class UsageStat:
         if self.p95 is not None:
             return self.p95, "p95"
         return self.avg, "avg"
-
-    def sizing(self) -> int:
-        """Value for request-sizing suggestions.
-
-        Sizing reads p95: a request set from the average under-serves the pod
-        most of the time it matters, and one set from the peak buys idle
-        capacity for a spike the scheduler cannot pack around.
-        """
-        return self.p95 if self.p95 is not None else self.avg
 
 
 @dataclass(frozen=True)
@@ -118,8 +109,8 @@ class Workload:
     current_replicas: int
 
     # Simulated / observed usage per pod. HPA math reads `avg`, because that is
-    # what the real HPA averages; the other statistics exist for the exposure
-    # and sizing questions and never move a replica count.
+    # what the real HPA averages; the other statistics answer the exposure
+    # question through `exposure()` and never move a replica count.
     observed_cpu_per_pod: UsageStat | None = None
     observed_memory_per_pod: UsageStat | None = None
 
